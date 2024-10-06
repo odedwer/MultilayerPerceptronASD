@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from matplotlib.animation import FuncAnimation
+from matplotlib.backends.backend_pdf import PdfPages
 from sympy.polys.polyoptions import Gaussian
 from tqdm import tqdm
 from sklearn.model_selection import train_test_split
@@ -82,8 +83,8 @@ class DataGenerator:
         return grid_x
 
 
-def sigmoid(x, thresh, slope, shift):
-    return (1 / (1 + np.exp(-slope * (x - thresh)))) + shift
+def sigmoid(x, thresh, slope):
+    return 1 / (1 + np.exp(-slope * (x - thresh)))
 
 
 # %%
@@ -92,13 +93,15 @@ input_size = 2
 hidden_size = 100
 n_hidden = 3
 output_size = 1
-num_samples = 100
+num_samples = 200
 b_scale = 1.0
+b_scale_high = 10.
 w_scale = 1.0
 scale = 1
 loc = 2
 # %%
 np.random.seed(0)
+torch.manual_seed(0)
 dg = DataGenerator(input_size, 2, [-loc, loc], [scale, scale])
 
 X, y = dg.create(num_samples)
@@ -122,7 +125,7 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
     model = MLP(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale)
     model.reinitialize(seed=42)
     criterion = nn.BCELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.SGD(model.parameters(), lr=0.001)
     model.eval()
     with torch.no_grad():
         resps.append(model(torch.tensor(grid, dtype=torch.float32)).detach().numpy())
@@ -150,8 +153,8 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
                 fit_pcov.append(pcov)
                 fit_results.append(params)
             except RuntimeError:
-                fit_pcov.append(np.full((3, 3), np.nan))
-                fit_results.append(np.full(3, np.nan))
+                fit_pcov.append(np.full((2, 2), np.nan))
+                fit_results.append(np.full(2, np.nan))
 
         model.train()
     model.eval()
@@ -159,22 +162,29 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
         y_pred = model(X_test)
         test_loss = criterion(y_pred, y_test)
         print(f'Test Loss: {test_loss.item():.4f}')
-    return resps, fit_results, fit_pcov
+    return model, resps, fit_results, fit_pcov
 
 
 # test the model
-resps_low_bias, params_low_bias, pcov_low_bias = train_model(input_size, hidden_size, n_hidden, output_size, w_scale,
+model_low_bias,resps_low_bias, params_low_bias, pcov_low_bias = train_model(input_size, hidden_size, n_hidden, output_size, w_scale,
                                                              b_scale, X_test, y_test,
                                                              dataloader)
-resps_high_bias, params_high_bias, pcov_high_bias = train_model(input_size, hidden_size, n_hidden, output_size, w_scale,
-                                                                20., X_test, y_test, dataloader)
+model_high_bias,resps_high_bias, params_high_bias, pcov_high_bias = train_model(input_size, hidden_size, n_hidden, output_size, w_scale,
+                                                                b_scale_high, X_test, y_test, dataloader)
+
+model_low_bias.eval()
+model_high_bias.eval()
+
 params_low_bias = np.array(params_low_bias)
 params_high_bias = np.array(params_high_bias)
 pcov_low_bias = np.array(pcov_low_bias)
 pcov_high_bias = np.array(pcov_high_bias)
 
+#%% create PDF for plots
+pdf = PdfPages(f"sgd_simulations_low_b_{b_scale}_high_b_{b_scale_high}_w_{w_scale}.pdf")
+
 # %% plot the change in slope
-plt.figure(figsize=(5, 5))
+fig = plt.figure(figsize=(5, 5))
 plt.plot(range(150), params_low_bias[:, 1], label="Low Bias", color='blue', markersize=1)
 plt.fill_between(range(150), params_low_bias[:, 1] - np.sqrt(pcov_low_bias[:, 1, 1]),
                  params_low_bias[:, 1] + np.sqrt(pcov_low_bias[:, 1, 1]), alpha=0.5, color='blue')
@@ -183,6 +193,34 @@ plt.fill_between(range(150), params_high_bias[:, 1] - np.sqrt(pcov_high_bias[:, 
                  params_high_bias[:, 1] + np.sqrt(pcov_high_bias[:, 1, 1]), alpha=0.5, color='red')
 plt.title(f"Slope over training, num_samples={num_samples}")
 plt.legend()
+pdf.savefig(fig)
+plt.show()
+
+# %% plot the x value for which the sigmoid crosses 0.5
+fig = plt.figure(figsize=(5, 5))
+plt.plot(range(3, 150), params_low_bias[3:, 0], label="Low Bias", color='blue', markersize=1)
+plt.fill_between(range(3, 150), params_low_bias[3:, 0] - np.sqrt(pcov_low_bias[3:, 0, 0]),
+                 params_low_bias[3:, 0] + np.sqrt(pcov_low_bias[3:, 0, 0]), alpha=0.5, color='blue')
+plt.plot(range(3, 150), params_high_bias[3:, 0], label="High Bias", color='red', markersize=1)
+plt.fill_between(range(3, 150), params_high_bias[3:, 0] - np.sqrt(pcov_high_bias[3:, 0, 0]),
+                 params_high_bias[3:, 0] + np.sqrt(pcov_high_bias[3:, 0, 0]), alpha=0.5, color='red')
+plt.title(f"Threshold over training, num_samples={num_samples}")
+plt.legend()
+pdf.savefig(fig)
+plt.show()
+
+# %% plot the diff over epochs for each model for slopes and thresholds
+fig, (ax_slope, ax_epoch) = plt.subplots(1, 2, figsize=(10, 5))
+ax_slope.plot(range(149), np.diff(params_low_bias[:, 1]), label="Low Bias", color='blue', markersize=1)
+ax_slope.plot(range(149), np.diff(params_high_bias[:, 1]), label="High Bias", color='red', markersize=1)
+ax_slope.set_title("Slope change speed")
+ax_slope.legend()
+
+ax_epoch.plot(range(3,149), np.diff(params_low_bias[3:, 0]), label="Low Bias", color='blue', markersize=1)
+ax_epoch.plot(range(3, 149), np.diff(params_high_bias[3:, 0]), label="High Bias", color='red', markersize=1)
+ax_epoch.set_title("Threshold change speed")
+ax_epoch.legend()
+pdf.savefig(fig)
 plt.show()
 
 
@@ -201,13 +239,48 @@ def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: Da
 
 fig_low_bias = plot_decision_throught_learning(grid, resps_low_bias, X_train, y_train, dg)
 fig_low_bias.suptitle("Low Bias")
+pdf.savefig(fig_low_bias)
 plt.show()
 
 fig_high_bias = plot_decision_throught_learning(grid, resps_high_bias, X_train, y_train, dg)
 fig_high_bias.suptitle("High Bias")
+pdf.savefig(fig_high_bias)
 plt.show()
 
+#%% plot decision boundary with training data
+proj_train_x= X_train
+proj_train_x_c0 = proj_train_x[y_train.flatten() == 0,:]
+proj_train_x_c1 = proj_train_x[y_train.flatten() == 1,:]
 
+# create a 2d points grid for the entire space
+n_point_in_grid = 501
+linspace = np.linspace(-6, 6, n_point_in_grid)
+grid_x, grid_y = np.meshgrid(linspace, linspace)
+
+grid_input = np.vstack([grid_x.flatten(), grid_y.flatten()]).T
+classifications_low = model_low_bias(torch.tensor(grid_input, dtype=torch.float32)).detach().numpy().reshape(n_point_in_grid,n_point_in_grid)
+classifications_high = model_high_bias(torch.tensor(grid_input, dtype=torch.float32)).detach().numpy().reshape(n_point_in_grid,n_point_in_grid)
+
+
+fig, (ax_low, ax_high) = plt.subplots(1,2,figsize=(12,5))
+c_low = ax_low.pcolormesh(linspace, linspace, classifications_low, vmin=0, vmax=1, alpha=0.5, cmap='coolwarm')
+ax_low.scatter(*proj_train_x_c1.T)
+ax_low.scatter(*proj_train_x_c0.T)
+# plot the countour of the decision boundary by coloring the sep_grid points according to the model response
+ax_low.set_title("Low Bias")
+
+c_high = ax_high.pcolormesh(linspace, linspace, classifications_high, vmin=0, vmax=1, alpha=0.5, cmap='coolwarm')
+ax_high.scatter(*proj_train_x_c1.T)
+ax_high.scatter(*proj_train_x_c0.T)
+ax_high.set_title("High Bias")
+fig.colorbar(c_low, ax=[ax_low, ax_high], orientation='vertical')
+
+plt.suptitle("Decision boundary")
+pdf.savefig(fig)
+plt.show()
+
+#%%
+pdf.close()
 # %%
 
 def animate_decision_through_learning(name, grid, resps, X_train, y_train, generator: DataGenerator):
@@ -244,18 +317,11 @@ def animate_decision_through_learning(name, grid, resps, X_train, y_train, gener
     return anim
 
 
-anim_low_bias = animate_decision_through_learning("low bias", grid, resps_low_bias, X_train, y_train, dg)
-anim_high_bias = animate_decision_through_learning("high bias", grid, resps_high_bias, X_train, y_train, dg)
+# anim_low_bias = animate_decision_through_learning("low bias", grid, resps_low_bias, X_train, y_train, dg)
+# anim_high_bias = animate_decision_through_learning("high bias", grid, resps_high_bias, X_train, y_train, dg)
 
-# %%
-import scipy.stats
 
-proj_grid = dg.project_data(grid)
-pdf1 = scipy.stats.norm(loc=-2, scale=1).pdf(proj_grid)
-plt.plot(proj_grid, pdf1)
-pdf2 = scipy.stats.norm(loc=2, scale=1).pdf(proj_grid)
-plt.plot(proj_grid, pdf2)
-plt.plot(proj_grid, pdf2 / (pdf1 + pdf2))
-plt.show()
 
-optimal_sigmoid_params, _ = curve_fit(sigmoid, np.squeeze(proj_grid), np.squeeze(pdf2 / (pdf1 + pdf2)))
+
+
+
