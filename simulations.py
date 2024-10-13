@@ -8,13 +8,13 @@ INPUT_SIZE = 2
 HIDDEN_SIZE = 200
 N_HIDDEN = 3
 OUTPUT_SIZE = 1
-NUM_SAMPLES = 1000
+NUM_SAMPLES = 100
 B_SCALE = 1.0
-B_SCALE_HIGH = 5.
-W_SCALE = 1.0
+B_SCALE_HIGH = 10.
+W_SCALE = np.sqrt(1.*(2/HIDDEN_SIZE))
 SCALE = 1
-LOC = 1
-OPTIM_TYPE = "SGD"
+LOC = 2
+OPTIM_TYPE = "Adam"
 # %%
 if __name__ == '__main__':
     X_train, X_test, y_train, y_test, dg, grid, dataloader = create_dataset(INPUT_SIZE, NUM_SAMPLES, LOC, SCALE, 2)
