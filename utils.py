@@ -12,8 +12,9 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from scipy.optimize import curve_fit
-
-
+from matplotlib.gridspec import GridSpec
+ASD_COLOR = "#FF0000"
+NT_COLOR = "#00A08A"
 # Define the MLP model
 class MLP(nn.Module):
     """
@@ -248,7 +249,7 @@ def create_dataset(input_size, num_samples, loc, scale, n_gaussians=2, seed=0):
 
 
 # %% Plotting
-def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: DataGenerator):
+def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: DataGenerator,ax=None, cax=False):
     """
     Plot the decision boundary through learning
     :param grid: The grid on which the response was evaluated
@@ -257,109 +258,132 @@ def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: Da
     :param y_train: The training labels
     :param generator: The DataGenerator object
     """
-    fig, ax = plt.subplots()
+    if ax is None:
+        fig, ax = plt.subplots()
+        ax.set_title("Decision boundary through learning")
+    else:
+        fig = ax.get_figure()
     cmap = plt.get_cmap('coolwarm')
     norm = Normalize(vmin=0, vmax=len(resps))
     for i in range(len(resps)):
         ax.plot(grid, resps[i], color=cmap(norm(i)))
     ax.scatter(generator.project_data(X_train), ((y_train - 0.5) * 1.05) + 0.5, c=y_train, s=5, alpha=0.5)
-    plt.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=ax)
+    if cax is not None and cax!=False:
+        plt.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation='vertical')
+        cax.set_ylabel("Epoch")
     return fig
 
 
-def plot_change_in_slope(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs):
+def plot_change_in_slope(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs, ax:plt.Axes=None):
     """
     Plot the change in slope over training
-    :param params_low_bias: The fitted parameters of the low bias model sigmoid
-    :param params_high_bias: The fitted parameters of the high bias model sigmoid
-    :param pcov_low_bias: The covariance matrix of the low bias model sigmoid fit
-    :param pcov_high_bias: The covariance matrix of the high bias model sigmoid fit
+    :param params_low_bias: The fitted parameters of the Low variance model sigmoid
+    :param params_high_bias: The fitted parameters of the High variance model sigmoid
+    :param pcov_low_bias: The covariance matrix of the Low variance model sigmoid fit
+    :param pcov_high_bias: The covariance matrix of the High variance model sigmoid fit
     :param num_epochs: The number of epochs
     """
-    fig = plt.figure(figsize=(5, 5))
-    plt.plot(range(num_epochs), params_low_bias[:, 1], label="Low Bias", color='blue', markersize=1)
-    plt.fill_between(range(num_epochs), params_low_bias[:, 1] - np.sqrt(pcov_low_bias[:, 1, 1]),
-                     params_low_bias[:, 1] + np.sqrt(pcov_low_bias[:, 1, 1]), alpha=0.5, color='blue')
-    plt.plot(range(num_epochs), params_high_bias[:, 1], label="High Bias", color='red', markersize=1)
-    plt.fill_between(range(num_epochs), params_high_bias[:, 1] - np.sqrt(pcov_high_bias[:, 1, 1]),
-                     params_high_bias[:, 1] + np.sqrt(pcov_high_bias[:, 1, 1]), alpha=0.5, color='red')
-    plt.title(f"Slope over training, num_samples={num_epochs}")
-    plt.legend()
+    if ax is None:
+        fig = plt.figure(figsize=(5, 5))
+        ax = fig.add_subplot(111)
+        ax.set_title(f"Slope over training, num_samples={num_epochs}")
+    else:
+        fig = ax.get_figure()
+    ax.plot(range(num_epochs), params_low_bias[:, 1], label="Low variance", color=NT_COLOR, markersize=1)
+    ax.fill_between(range(num_epochs), params_low_bias[:, 1] - np.sqrt(pcov_low_bias[:, 1, 1]),
+                     params_low_bias[:, 1] + np.sqrt(pcov_low_bias[:, 1, 1]), alpha=0.5, color=NT_COLOR)
+    ax.plot(range(num_epochs), params_high_bias[:, 1], label="High variance", color=ASD_COLOR, markersize=1)
+    ax.fill_between(range(num_epochs), params_high_bias[:, 1] - np.sqrt(pcov_high_bias[:, 1, 1]),
+                     params_high_bias[:, 1] + np.sqrt(pcov_high_bias[:, 1, 1]), alpha=0.5, color=ASD_COLOR)
+    # ax.set_xlabel("Epoch")
+    ax.set_ylabel("Slope")
+    ax.legend()
     return fig
 
 
-def plot_km(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs):
+def plot_km(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs, ax=None):
     """
     Plot the x value for which the sigmoid crosses 0.5
-    :param params_low_bias: The fitted parameters of the low bias model sigmoid
-    :param params_high_bias: The fitted parameters of the high bias model sigmoid
-    :param pcov_low_bias: The covariance matrix of the low bias model sigmoid fit
-    :param pcov_high_bias: The covariance matrix of the high bias model sigmoid fit
+    :param params_low_bias: The fitted parameters of the Low variance model sigmoid
+    :param params_high_bias: The fitted parameters of the High variance model sigmoid
+    :param pcov_low_bias: The covariance matrix of the Low variance model sigmoid fit
+    :param pcov_high_bias: The covariance matrix of the High variance model sigmoid fit
     :param num_epochs: The number of epochs
     """
-    fig = plt.figure(figsize=(5, 5))
-    plt.plot(range(num_epochs // 50, num_epochs), params_low_bias[num_epochs // 50:, 0], label="Low Bias", color='blue',
+    if ax is None:
+        fig = plt.figure(figsize=(5, 5))
+        ax = fig.add_subplot(111)
+        ax.set_title(f"Threshold over training")
+    else:
+        fig = ax.get_figure()
+    ax.plot(range(num_epochs // 50, num_epochs), params_low_bias[num_epochs // 50:, 0], label="Low variance", color=NT_COLOR,
              markersize=1)
-    plt.fill_between(range(num_epochs // 50, num_epochs),
+    ax.fill_between(range(num_epochs // 50, num_epochs),
                      params_low_bias[num_epochs // 50:, 0] - np.sqrt(pcov_low_bias[num_epochs // 50:, 0, 0]),
                      params_low_bias[num_epochs // 50:, 0] + np.sqrt(pcov_low_bias[num_epochs // 50:, 0, 0]), alpha=0.5,
-                     color='blue')
-    plt.plot(range(num_epochs // 50, num_epochs), params_high_bias[num_epochs // 50:, 0], label="High Bias",
-             color='red',
+                     color=NT_COLOR)
+    ax.plot(range(num_epochs // 50, num_epochs), params_high_bias[num_epochs // 50:, 0], label="High variance",
+             color=ASD_COLOR,
              markersize=1)
-    plt.fill_between(range(num_epochs // 50, num_epochs),
+    ax.fill_between(range(num_epochs // 50, num_epochs),
                      params_high_bias[num_epochs // 50:, 0] - np.sqrt(pcov_high_bias[num_epochs // 50:, 0, 0]),
                      params_high_bias[num_epochs // 50:, 0] + np.sqrt(pcov_high_bias[num_epochs // 50:, 0, 0]),
                      alpha=0.5,
-                     color='red')
-    plt.title(f"Threshold over training")
-    plt.legend()
+                     color=ASD_COLOR)
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Threshold")
+    ax.legend()
     return fig
 
 
 def plot_learning_speed(params_low_bias, params_high_bias, num_epochs):
     """
     Plot the change in slope and threshold over epochs
-    :param params_low_bias: The fitted parameters of the low bias model sigmoid
-    :param params_high_bias: The fitted parameters of the high bias model sigmoid
+    :param params_low_bias: The fitted parameters of the Low variance model sigmoid
+    :param params_high_bias: The fitted parameters of the High variance model sigmoid
     :param num_epochs: The number of epochs
     """
     fig, (ax_slope, ax_epoch) = plt.subplots(1, 2, figsize=(10, 5))
-    ax_slope.plot(range(num_epochs - 1), np.diff(params_low_bias[:, 1]), label="Low Bias", color='blue', markersize=1)
-    ax_slope.plot(range(num_epochs - 1), np.diff(params_high_bias[:, 1]), label="High Bias", color='red', markersize=1)
+    ax_slope.plot(range(num_epochs - 1), np.diff(params_low_bias[:, 1]), label="Low variance", color=NT_COLOR, markersize=1)
+    ax_slope.plot(range(num_epochs - 1), np.diff(params_high_bias[:, 1]), label="High variance", color=ASD_COLOR, markersize=1)
     ax_slope.set_title("Slope change speed")
     ax_slope.legend()
 
     ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_low_bias[num_epochs // 50:, 0]),
-                  label="Low Bias",
-                  color='blue', markersize=1)
+                  label="Low variance",
+                  color=NT_COLOR, markersize=1)
     ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_high_bias[num_epochs // 50:, 0]),
-                  label="High Bias", color='red', markersize=1)
+                  label="High variance", color=ASD_COLOR, markersize=1)
     ax_epoch.set_title("Threshold change speed")
     ax_epoch.legend()
     return fig
 
 
-def plot_variance_sliding_window(params_low_bias, params_high_bias):
+def plot_variance_sliding_window(params_low_bias, params_high_bias, ax=None):
     """
     Plot the variance of the threshold over a sliding window
-    :param params_low_bias: The fitted parameters of the low bias model sigmoid
-    :param params_high_bias: The fitted parameters of the high bias model sigmoid
+    :param params_low_bias: The fitted parameters of the Low variance model sigmoid
+    :param params_high_bias: The fitted parameters of the High variance model sigmoid
     """
-    global fig
-    fig, ax = plt.subplots()
+    if ax is None:
+        global fig
+        fig, ax = plt.subplots()
+        ax.set_title(f"Threshold variance over training")
+    else:
+        fig = ax.get_figure()
+
     window_size = 10
     low_bias_var = np.lib.stride_tricks.sliding_window_view(params_low_bias[:, 0], window_shape=window_size).var(1)
     high_bias_var = np.lib.stride_tricks.sliding_window_view(params_high_bias[:, 0], window_shape=window_size).var(1)
-    ax.plot(range(1, low_bias_var.size + 1), low_bias_var, label="Low Bias", color='blue')
-    ax.plot(range(1, high_bias_var.size + 1), high_bias_var, label="High Bias", color='red')
-    ax.set_title("Threshold variance over training")
+    ax.plot(range(1, low_bias_var.size + 1), low_bias_var, label="Low variance", color=NT_COLOR)
+    ax.plot(range(1, high_bias_var.size + 1), high_bias_var, label="High variance", color=ASD_COLOR)
+
     ax.set_xlabel(f"Window, #epochs per window={window_size}")
     ax.set_ylabel("Variance")
     ax.legend()
 
 
-def plot_decision_boundary(X_train, y_train, model, ax, title):
+def plot_decision_boundary(X_train, y_train, model, ax, title=None):
     """
     Plot the decision boundary with training data
     :param X_train: The training data
@@ -383,5 +407,6 @@ def plot_decision_boundary(X_train, y_train, model, ax, title):
     ax.scatter(*train_x_c1.T)
     ax.scatter(*train_x_c0.T)
     # plot the countour of the decision boundary by coloring the sep_grid points according to the model response
-    ax.set_title(title)
+    if title:
+        ax.set_title(title)
     return c
