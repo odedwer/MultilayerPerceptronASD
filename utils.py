@@ -12,9 +12,13 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib.colors import Normalize
 from scipy.optimize import curve_fit
+from sklearn.metrics.pairwise import pairwise_distances
 from matplotlib.gridspec import GridSpec
+
 ASD_COLOR = "#FF0000"
 NT_COLOR = "#00A08A"
+
+
 # Define the MLP model
 class MLP(nn.Module):
     """
@@ -25,20 +29,32 @@ class MLP(nn.Module):
         super(MLP, self).__init__()
         self._layers = nn.Sequential()
         self._layers.add_module('fc1', nn.Linear(input_size, hidden_size, bias=True))
-        self.relu = nn.ReLU()
-        self._layers.add_module('relu', self.relu)
+        self._layers.add_module('activation_func1', nn.Tanh())
         self.w_scale = w_scale
         self.b_scale = b_scale
         for i in range(n_hidden):
             self._layers.add_module(f'fc{i + 2}', nn.Linear(hidden_size, hidden_size, bias=True))
-            self._layers.add_module(f'relu{i + 2}', self.relu)
+            self._layers.add_module(f'activation_func{i + 2}', nn.Tanh())
         self._layers.add_module('fc_last', nn.Linear(hidden_size, output_size, bias=True))
         self._layers.add_module('sigmoid', nn.Sigmoid())
+        self._handles = []
         # self.reinitialize()
 
-    def set_forward_hook(self, hook_generator):
+    def set_activations_hook(self, activations):
+        def hook_generator(name, activations):
+            def hook(model, input, output):
+                activations[name] = output.detach().numpy()
+
+            return hook
+
+        self._handles = []
         for name, m in self._layers.named_modules():
-            m.register_forward_hook(hook_generator(name))
+            self._handles.append(m.register_forward_hook(hook_generator(name, activations)))
+
+    def remove_activations_hook(self):
+        for handle in self._handles:
+            handle.remove()
+        self._handles = []
 
     def get_out_activation(self):
         return self._layers[-1]
@@ -53,13 +69,6 @@ class MLP(nn.Module):
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight)
                 nn.init.normal_(m.bias, 0, self.b_scale)
-
-
-def forward_hook_generator(name, activations):
-    def hook(model, input, output):
-        activations[name].append(output.detach().numpy())
-
-    return hook
 
 
 class DataGenerator:
@@ -113,7 +122,7 @@ def sigmoid(x, thresh, slope):
 
 # Initialize the model, loss function, and optimizer
 def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale,
-                X_test, y_test, dataloader, dg, grid, optimizer_type=optim.Adam, num_epochs=300):
+                X_train, y_train,X_test, y_test, dataloader, dg, grid, optimizer_type=optim.Adam, num_epochs=300):
     """
     Create and train the model using the given arguments
     :param input_size: The dimension of the input
@@ -134,16 +143,20 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
     resps = []
     fit_results = []
     fit_pcov = []
-    activations = defaultdict(list)
+    activations = {}
     x = dg.project_data(grid)
     model = MLP(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale)
     model.reinitialize(seed=42)
-    model.set_forward_hook(lambda x, a=activations: forward_hook_generator(x, a))
+    model.set_activations_hook(activations)
     criterion = nn.BCELoss()
     optimizer = optimizer_type(model.parameters(), lr=0.001)
     model.eval()
+    input_dist = pairwise_distances(X_train.detach().numpy())[np.triu_indices(X_train.shape[0])]
     with torch.no_grad():
         resps.append(model(torch.tensor(grid, dtype=torch.float32)).detach().numpy())
+        model(X_train)
+        layer_distances = {k: pairwise_distances(v)[np.triu_indices(X_train.shape[0])] for k, v in activations.items()}
+    model.remove_activations_hook()
     model.train()
     # Training loop
     for epoch in tqdm(range(num_epochs), desc="Training"):
@@ -176,7 +189,7 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
         y_pred = model(X_test)
         test_loss = criterion(y_pred, y_test)
         print(f'Test Loss: {test_loss.item():.4f}')
-    return model, resps, fit_results, fit_pcov, activations
+    return model, resps, fit_results, fit_pcov, input_dist, layer_distances
 
 
 def animate_decision_through_learning(name, grid, resps, X_train, y_train, generator: DataGenerator):
@@ -249,7 +262,7 @@ def create_dataset(input_size, num_samples, loc, scale, n_gaussians=2, seed=0):
 
 
 # %% Plotting
-def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: DataGenerator,ax=None, cax=False):
+def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: DataGenerator, ax=None, cax=False):
     """
     Plot the decision boundary through learning
     :param grid: The grid on which the response was evaluated
@@ -268,13 +281,14 @@ def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: Da
     for i in range(len(resps)):
         ax.plot(grid, resps[i], color=cmap(norm(i)))
     ax.scatter(generator.project_data(X_train), ((y_train - 0.5) * 1.05) + 0.5, c=y_train, s=5, alpha=0.5)
-    if cax is not None and cax!=False:
+    if cax is not None and cax != False:
         plt.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), cax=cax, orientation='vertical')
         cax.set_ylabel("Epoch")
     return fig
 
 
-def plot_change_in_slope(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs, ax:plt.Axes=None):
+def plot_change_in_slope(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs,
+                         ax: plt.Axes = None):
     """
     Plot the change in slope over training
     :param params_low_bias: The fitted parameters of the Low variance model sigmoid
@@ -291,10 +305,10 @@ def plot_change_in_slope(params_low_bias, params_high_bias, pcov_low_bias, pcov_
         fig = ax.get_figure()
     ax.plot(range(num_epochs), params_low_bias[:, 1], label="Low variance", color=NT_COLOR, markersize=1)
     ax.fill_between(range(num_epochs), params_low_bias[:, 1] - np.sqrt(pcov_low_bias[:, 1, 1]),
-                     params_low_bias[:, 1] + np.sqrt(pcov_low_bias[:, 1, 1]), alpha=0.5, color=NT_COLOR)
+                    params_low_bias[:, 1] + np.sqrt(pcov_low_bias[:, 1, 1]), alpha=0.5, color=NT_COLOR)
     ax.plot(range(num_epochs), params_high_bias[:, 1], label="High variance", color=ASD_COLOR, markersize=1)
     ax.fill_between(range(num_epochs), params_high_bias[:, 1] - np.sqrt(pcov_high_bias[:, 1, 1]),
-                     params_high_bias[:, 1] + np.sqrt(pcov_high_bias[:, 1, 1]), alpha=0.5, color=ASD_COLOR)
+                    params_high_bias[:, 1] + np.sqrt(pcov_high_bias[:, 1, 1]), alpha=0.5, color=ASD_COLOR)
     # ax.set_xlabel("Epoch")
     ax.set_ylabel("Slope")
     ax.legend()
@@ -316,20 +330,21 @@ def plot_km(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, nu
         ax.set_title(f"Threshold over training")
     else:
         fig = ax.get_figure()
-    ax.plot(range(num_epochs // 50, num_epochs), params_low_bias[num_epochs // 50:, 0], label="Low variance", color=NT_COLOR,
-             markersize=1)
+    ax.plot(range(num_epochs // 50, num_epochs), params_low_bias[num_epochs // 50:, 0], label="Low variance",
+            color=NT_COLOR,
+            markersize=1)
     ax.fill_between(range(num_epochs // 50, num_epochs),
-                     params_low_bias[num_epochs // 50:, 0] - np.sqrt(pcov_low_bias[num_epochs // 50:, 0, 0]),
-                     params_low_bias[num_epochs // 50:, 0] + np.sqrt(pcov_low_bias[num_epochs // 50:, 0, 0]), alpha=0.5,
-                     color=NT_COLOR)
+                    params_low_bias[num_epochs // 50:, 0] - np.sqrt(pcov_low_bias[num_epochs // 50:, 0, 0]),
+                    params_low_bias[num_epochs // 50:, 0] + np.sqrt(pcov_low_bias[num_epochs // 50:, 0, 0]), alpha=0.5,
+                    color=NT_COLOR)
     ax.plot(range(num_epochs // 50, num_epochs), params_high_bias[num_epochs // 50:, 0], label="High variance",
-             color=ASD_COLOR,
-             markersize=1)
+            color=ASD_COLOR,
+            markersize=1)
     ax.fill_between(range(num_epochs // 50, num_epochs),
-                     params_high_bias[num_epochs // 50:, 0] - np.sqrt(pcov_high_bias[num_epochs // 50:, 0, 0]),
-                     params_high_bias[num_epochs // 50:, 0] + np.sqrt(pcov_high_bias[num_epochs // 50:, 0, 0]),
-                     alpha=0.5,
-                     color=ASD_COLOR)
+                    params_high_bias[num_epochs // 50:, 0] - np.sqrt(pcov_high_bias[num_epochs // 50:, 0, 0]),
+                    params_high_bias[num_epochs // 50:, 0] + np.sqrt(pcov_high_bias[num_epochs // 50:, 0, 0]),
+                    alpha=0.5,
+                    color=ASD_COLOR)
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Threshold")
     ax.legend()
@@ -344,8 +359,10 @@ def plot_learning_speed(params_low_bias, params_high_bias, num_epochs):
     :param num_epochs: The number of epochs
     """
     fig, (ax_slope, ax_epoch) = plt.subplots(1, 2, figsize=(10, 5))
-    ax_slope.plot(range(num_epochs - 1), np.diff(params_low_bias[:, 1]), label="Low variance", color=NT_COLOR, markersize=1)
-    ax_slope.plot(range(num_epochs - 1), np.diff(params_high_bias[:, 1]), label="High variance", color=ASD_COLOR, markersize=1)
+    ax_slope.plot(range(num_epochs - 1), np.diff(params_low_bias[:, 1]), label="Low variance", color=NT_COLOR,
+                  markersize=1)
+    ax_slope.plot(range(num_epochs - 1), np.diff(params_high_bias[:, 1]), label="High variance", color=ASD_COLOR,
+                  markersize=1)
     ax_slope.set_title("Slope change speed")
     ax_slope.legend()
 
@@ -410,3 +427,7 @@ def plot_decision_boundary(X_train, y_train, model, ax, title=None):
     if title:
         ax.set_title(title)
     return c
+
+
+def pair_distances(x):
+    return np.sqrt(np.mean((x[::2] - x[1::2]) ** 2, axis=-1))

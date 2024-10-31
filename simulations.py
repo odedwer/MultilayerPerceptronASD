@@ -11,13 +11,13 @@ plt.rcParams['axes.titleweight'] = 'bold'
 # Parameters
 NUM_EPOCHS = 150
 INPUT_SIZE = 2
-HIDDEN_SIZE = 200
-N_HIDDEN = 3
+HIDDEN_SIZE = 600
+N_HIDDEN = 4
 OUTPUT_SIZE = 1
-NUM_SAMPLES = 100
-B_SCALE = 1.0
-B_SCALE_HIGH = 10.
-W_SCALE = np.sqrt(1.*(2/HIDDEN_SIZE))
+NUM_SAMPLES = 250
+B_SCALE = .1
+B_SCALE_HIGH = 5.
+W_SCALE = np.sqrt(1. * (2 / HIDDEN_SIZE))
 SCALE = 1
 LOC = 2
 OPTIM_TYPE = "Adam"
@@ -28,15 +28,28 @@ if __name__ == '__main__':
     opt = optim.Adam if OPTIM_TYPE == "Adam" else optim.SGD
     # train the models
     (model_low_bias, resps_low_bias,
-     params_low_bias, pcov_low_bias, low_bias_activations) = train_model(INPUT_SIZE, HIDDEN_SIZE, N_HIDDEN,
-                                                                         OUTPUT_SIZE, W_SCALE, B_SCALE, X_test,
-                                                                         y_test, dataloader, dg, grid, opt, NUM_EPOCHS)
+     params_low_bias, pcov_low_bias, inp_dist, pretrain_distances) = train_model(INPUT_SIZE, HIDDEN_SIZE, N_HIDDEN,
+                                                                                 OUTPUT_SIZE, W_SCALE, B_SCALE, X_train,
+                                                                                 y_train, X_test,
+                                                                                 y_test, dataloader, dg, grid, opt,
+                                                                                 NUM_EPOCHS)
     (model_high_bias, resps_high_bias,
-     params_high_bias, pcov_high_bias, high_bias_activations) = train_model(INPUT_SIZE, HIDDEN_SIZE, N_HIDDEN,
-                                                                            OUTPUT_SIZE, W_SCALE, B_SCALE_HIGH,
-                                                                            X_test, y_test, dataloader, dg, grid, opt,
-                                                                            NUM_EPOCHS)
-
+     params_high_bias, pcov_high_bias, _, pretrain_distances_wide) = train_model(INPUT_SIZE, HIDDEN_SIZE, N_HIDDEN,
+                                                                                 OUTPUT_SIZE, W_SCALE, B_SCALE_HIGH,
+                                                                                 X_train, y_train,
+                                                                                 X_test, y_test, dataloader, dg, grid,
+                                                                                 opt,
+                                                                                 NUM_EPOCHS)
+    # for layer, distances in pretrain_distances.items():
+    #     if 'relu' in layer:
+    #         plt.figure()
+    #         plt.title("Pre-train " + layer)
+    #         plt.scatter(inp_dist, distances, label=layer, alpha=0.5)
+    #         plt.scatter(inp_dist, pretrain_distances_wide[layer], label=layer + ' wide', alpha=0.5)
+    #         plt.legend()
+    #         plt.xlabel('Input distance')
+    #         plt.ylabel('Layer distance')
+    #     plt.show()
     model_low_bias.eval()
     model_high_bias.eval()
 
@@ -45,14 +58,44 @@ if __name__ == '__main__':
     pcov_low_bias = np.array(pcov_low_bias)
     pcov_high_bias = np.array(pcov_high_bias)
 
-    #%%
+    activations = {}
+    activations_wide = {}
+    model_low_bias.set_activations_hook(activations)
+    model_high_bias.set_activations_hook(activations_wide)
+
+    model_low_bias(X_train)
+    model_high_bias(X_train)
+    layer_distances = {k: pairwise_distances(v)[np.triu_indices(X_train.shape[0])] for k, v in activations.items()}
+    layer_distances_wide = {k: pairwise_distances(v)[np.triu_indices(X_train.shape[0])] for k, v in
+                            activations_wide.items()}
+    pdf = PdfPages(f"input output distances {OPTIM_TYPE}.pdf")
+    for layer, distances in layer_distances.items():
+        if 'activation_func' in layer.lower() or 'sigmoid' in layer:
+            fig,axes = plt.subplots(1,2,figsize=(10,5), sharey=True,rasterized=True)
+            fig.suptitle(layer)
+            axes[0].set_title("Before training")
+            axes[0].scatter(inp_dist, pretrain_distances[layer], label=layer, alpha=0.3, s=1)
+            axes[0].scatter(inp_dist, pretrain_distances_wide[layer], label=layer + ' wide', alpha=0.3, s=1)
+            axes[0].legend()
+            axes[0].set_xlabel('Input distance')
+            axes[0].set_ylabel('Layer distance')
+
+            axes[1].set_title("After training")
+            axes[1].scatter(inp_dist, distances, label=layer, alpha=0.5, s=1)
+            axes[1].scatter(inp_dist, layer_distances_wide[layer], label=layer + ' wide', alpha=0.5, s=1)
+            axes[1].legend()
+            axes[1].set_xlabel('Input distance')
+            pdf.savefig(fig)
+            plt.close(fig)
+    pdf.close()
+    # %%
     fig = plt.figure(figsize=(10, 7.5))
-    gs = GridSpec(3,9, width_ratios=[1,1.5,0.2,0.5,1,1,1,0.2,0.1], height_ratios=[0.5,0.5,0.85])
+    gs = GridSpec(3, 9, width_ratios=[1, 1.5, 0.2, 0.5, 1, 1, 1, 0.2, 0.1], height_ratios=[0.5, 0.5, 0.85])
     slope_ax = fig.add_subplot(gs[0, :2])
     thresh_var_ax = fig.add_subplot(gs[1, :2], sharex=slope_ax)
     learned_func_low_bias_ax = fig.add_subplot(gs[0, 3:-1])
     cax_learned_func = fig.add_subplot(gs[0:2, -1])
-    learned_func_high_bias_ax = fig.add_subplot(gs[1, 3:-1],sharex=learned_func_low_bias_ax)
+    learned_func_high_bias_ax = fig.add_subplot(gs[1, 3:-1], sharex=learned_func_low_bias_ax)
     decision_bound_low_bias_ax = fig.add_subplot(gs[2, :4])
     decision_bound_high_bias_ax = fig.add_subplot(gs[2, 4:-1], sharey=decision_bound_low_bias_ax)
     cax_decision_bound = fig.add_subplot(gs[2, -1])
@@ -62,8 +105,10 @@ if __name__ == '__main__':
     # plot the threshold variance
     plot_variance_sliding_window(params_low_bias, params_high_bias, ax=thresh_var_ax)
     # plot the resps, from before training until after training colored by epoch on a scale from 0 (red) to num_epochs (blue)
-    plot_decision_throught_learning(grid, resps_low_bias, X_train, y_train, dg, ax=learned_func_low_bias_ax, cax=cax_learned_func)
-    plot_decision_throught_learning(grid, resps_high_bias, X_train, y_train, dg, ax=learned_func_high_bias_ax, cax=cax_learned_func)
+    plot_decision_throught_learning(grid, resps_low_bias, X_train, y_train, dg, ax=learned_func_low_bias_ax,
+                                    cax=cax_learned_func)
+    plot_decision_throught_learning(grid, resps_high_bias, X_train, y_train, dg, ax=learned_func_high_bias_ax,
+                                    cax=cax_learned_func)
     learned_func_high_bias_ax.set_xlabel("Projection unto the separating line")
     learned_func_high_bias_ax.set_ylabel("$P(C=1)$")
     learned_func_low_bias_ax.set_xlabel("Projection unto the separating line")
@@ -84,10 +129,8 @@ if __name__ == '__main__':
     fig.text(0.375, 0.68, 'D', fontsize=20, fontweight='bold')
     fig.text(0.025, 0.4, 'E', fontsize=20, fontweight='bold')
     fig.text(0.475, 0.4, 'F', fontsize=20, fontweight='bold')
-    plt.savefig("MLP.pdf")
+    plt.savefig(f"{OPTIM_TYPE} MLP.pdf")
     plt.show()
-
-
 
 #     pdf_name = f"{OPTIM_TYPE}_simulations_low_b_{B_SCALE}_high_b_{B_SCALE_HIGH}_w_{W_SCALE}_loc_{LOC}_scale_{SCALE}.pdf"
 #     with PdfPages(pdf_name) as pdf:
