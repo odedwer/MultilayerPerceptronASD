@@ -2,11 +2,11 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from utils import *
 
-plt.rcParams['axes.labelsize'] = 11
+plt.rcParams['axes.labelsize'] = 18
 plt.rcParams['axes.labelweight'] = 'bold'
-plt.rcParams['axes.titlesize'] = 14
+plt.rcParams['axes.titlesize'] = 20
 plt.rcParams['axes.titleweight'] = 'bold'
-
+plt.rcParams['legend.fontsize'] = 16
 # %%
 # Parameters
 NUM_EPOCHS = 150
@@ -20,7 +20,7 @@ B_SCALE_HIGH = 5.
 W_SCALE = np.sqrt(1. * (2 / HIDDEN_SIZE))
 SCALE = 1
 LOC = 2
-OPTIM_TYPE = "Adam"
+OPTIM_TYPE = "SGD"
 # %%
 if __name__ == '__main__':
     X_train, X_test, y_train, y_test, dg, grid, dataloader = create_dataset(INPUT_SIZE, NUM_SAMPLES, LOC, SCALE, 2)
@@ -40,16 +40,19 @@ if __name__ == '__main__':
                                                                                  X_test, y_test, dataloader, dg, grid,
                                                                                  opt,
                                                                                  NUM_EPOCHS)
-    # for layer, distances in pretrain_distances.items():
-    #     if 'relu' in layer:
-    #         plt.figure()
-    #         plt.title("Pre-train " + layer)
-    #         plt.scatter(inp_dist, distances, label=layer, alpha=0.5)
-    #         plt.scatter(inp_dist, pretrain_distances_wide[layer], label=layer + ' wide', alpha=0.5)
-    #         plt.legend()
-    #         plt.xlabel('Input distance')
-    #         plt.ylabel('Layer distance')
-    #     plt.show()
+    for layer, distances in pretrain_distances.items():
+        if 'sigmoid' in layer or "activation_func" in layer.lower():
+            plt.figure()
+            if 'activation_func' in layer.lower():
+                plt.title("Layer "+layer[-1])
+            else:
+                plt.title(layer)
+            plt.scatter(inp_dist, distances, label=rf"$\sigma_b={B_SCALE}$", alpha=0.5)
+            plt.scatter(inp_dist, pretrain_distances_wide[layer], label=rf"$\sigma_b={B_SCALE_HIGH}$", alpha=0.5)
+            plt.legend(fontsize=15)
+            plt.xlabel('Input distance')
+            plt.ylabel('Layer distance')
+        plt.show()
     model_low_bias.eval()
     model_high_bias.eval()
 
