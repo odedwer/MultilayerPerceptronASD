@@ -122,7 +122,7 @@ def sigmoid(x, thresh, slope):
 
 # Initialize the model, loss function, and optimizer
 def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale,
-                X_train, y_train,X_test, y_test, dataloader, dg, grid, optimizer_type=optim.Adam, num_epochs=300):
+                X_train, y_train, X_test, y_test, dataloader, dg, grid, optimizer_type=optim.Adam, num_epochs=300):
     """
     Create and train the model using the given arguments
     :param input_size: The dimension of the input
@@ -351,28 +351,32 @@ def plot_km(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, nu
     return fig
 
 
-def plot_learning_speed(params_low_bias, params_high_bias, num_epochs):
+def plot_learning_speed(params_low_bias, params_high_bias, num_epochs, ax_slope=None):
     """
     Plot the change in slope and threshold over epochs
     :param params_low_bias: The fitted parameters of the Low variance model sigmoid
     :param params_high_bias: The fitted parameters of the High variance model sigmoid
     :param num_epochs: The number of epochs
     """
-    fig, (ax_slope, ax_epoch) = plt.subplots(1, 2, figsize=(10, 5))
+    # fig, (ax_slope, ax_epoch) = plt.subplots(1, 2, figsize=(10, 5))
+    if ax_slope is None:
+        fig, ax_slope = plt.subplots(1, 1, figsize=(7, 5))
+    else:
+        fig = ax_slope.get_figure()
     ax_slope.plot(range(num_epochs - 1), np.diff(params_low_bias[:, 1]), label="Low variance", color=NT_COLOR,
                   markersize=1)
     ax_slope.plot(range(num_epochs - 1), np.diff(params_high_bias[:, 1]), label="High variance", color=ASD_COLOR,
                   markersize=1)
-    ax_slope.set_title("Slope change speed")
+    ax_slope.set_ylabel(r"$\Delta$Slope")
     ax_slope.legend()
 
-    ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_low_bias[num_epochs // 50:, 0]),
-                  label="Low variance",
-                  color=NT_COLOR, markersize=1)
-    ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_high_bias[num_epochs // 50:, 0]),
-                  label="High variance", color=ASD_COLOR, markersize=1)
-    ax_epoch.set_title("Threshold change speed")
-    ax_epoch.legend()
+    # ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_low_bias[num_epochs // 50:, 0]),
+    #               label="Low variance",
+    #               color=NT_COLOR, markersize=1)
+    # ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_high_bias[num_epochs // 50:, 0]),
+    #               label="High variance", color=ASD_COLOR, markersize=1)
+    # ax_epoch.set_title("Threshold change speed")
+    # ax_epoch.legend()
     return fig
 
 
