@@ -7,6 +7,8 @@ plt.rcParams['axes.labelweight'] = 'bold'
 plt.rcParams['axes.titlesize'] = 16
 plt.rcParams['axes.titleweight'] = 'bold'
 plt.rcParams['legend.fontsize'] = 14
+plt.rcParams['axes.spines.top'] = False
+plt.rcParams['axes.spines.right'] = False
 # %%
 # Parameters
 NUM_EPOCHS = 150
@@ -160,7 +162,7 @@ if __name__ == '__main__':
             [std_dist_l1, std_dist_l4],
             [avg_dist_l1_wide, avg_dist_l4_wide],
             [std_dist_l1_wide, std_dist_l4_wide],
-            [l1_ax, l2_ax], ["L1 tanh", "L4 tanh"]
+            [l1_ax, l2_ax], ["L1", "L4"]
     ):
 
         l1, = axes.plot(input_dist_bins[1:], distances, label=label, color=NT_COLOR)
@@ -169,8 +171,7 @@ if __name__ == '__main__':
         axes.fill_between(input_dist_bins[1:], distances_wide - std_wide, distances_wide + std_wide, color=ASD_COLOR,
                           alpha=0.3)
 
-
-        leg = axes.legend([l1,l2], [label,label + " high variance"],markerscale=10, fontsize=12)
+        leg = axes.legend([l1, l2], [label+ " low variance", label + " high variance"], markerscale=10, fontsize=12)
         for lh in leg.legend_handles:
             lh.set_alpha(1)
 
@@ -185,8 +186,12 @@ if __name__ == '__main__':
     # plot the resps, from before training until after training colored by epoch on a scale from 0 (red) to num_epochs (blue)
     plot_decision_throught_learning(grid, resps_low_bias, X_train, y_train, dg, ax=learned_func_low_bias_ax,
                                     cax=cax_learned_func)
+    learned_func_low_bias_ax.text(0.05, 0.8, "Low variance", fontsize=14, fontweight='bold',
+                                  transform=learned_func_low_bias_ax.transAxes)
     plot_decision_throught_learning(grid, resps_high_bias, X_train, y_train, dg, ax=learned_func_high_bias_ax,
                                     cax=cax_learned_func)
+    learned_func_high_bias_ax.text(0.05, 0.8, "High variance", fontsize=14, fontweight='bold',
+                                  transform=learned_func_high_bias_ax.transAxes)
     learned_func_high_bias_ax.set_xlabel("Projection unto the separating line")
     learned_func_high_bias_ax.set_ylabel("$P(C=1)$")
     learned_func_low_bias_ax.set_xlabel("Projection unto the separating line")
