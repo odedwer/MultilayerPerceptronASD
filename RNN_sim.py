@@ -5,6 +5,8 @@ import torch.optim as optim
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from tqdm import tqdm, trange
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import RNNConfig, default_bias_means
@@ -536,6 +538,7 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
         with open(cfg_path, "w") as f:
             json.dump(cfg.__dict__, f, indent=2)
 
+    torch.cuda.synchronize()
     # --- Plotting ---
     fig, ax = plt.subplots(2, 3, figsize=(14, 8))
     ax = ax.ravel()
@@ -620,12 +623,12 @@ if __name__ == "__main__":
     print(f"Training on device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # Parameter grid
-    M_states_list = [5]  # [4, 5, 6]
-    K_symbols_list = [12]
-    L_input_list = [10]  # [7, 11, 15]
-    D_delay_list = [60]  # [10, 15, 20]
+    M_states_list = [4]  # [4, 5, 6]
+    K_symbols_list = [7, 9, 12]
+    L_input_list = [10, 15]  # [7, 11, 15]
+    D_delay_list = [20, 40, 60]  # [10, 15, 20]
     s_transitions_list = [2]  # [2, 3]
-    s_emissions_list = [2]  # [2, 3]
+    s_emissions_list = [3]  # [2, 3]
     flip_prob_list = [0.05]  # [0.0, 0.05, 0.2]
 
     # Create all combinations
