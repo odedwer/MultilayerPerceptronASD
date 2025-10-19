@@ -35,9 +35,9 @@ class RNNConfig:
 
     # Training
     lr: float = 1e-3
-    batch_size: int = 128
+    batch_size: int = 256
     epochs: int = 20
-    grad_clip: float = 1.0
+    grad_clip: float = 5.0
     test_eval_interval = 10
 
     # Probes
