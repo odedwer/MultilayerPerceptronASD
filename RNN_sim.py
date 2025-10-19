@@ -467,7 +467,7 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
 
     # --- Consistent color palette ---
     colors = {
-        "Default": "#F2AD00",   # Wes Anderson Darjeeling1 yellow
+        # "Default": "#F2AD00",   # Wes Anderson Darjeeling1 yellow
         "Low": utils.NT_COLOR,  # "#00A08A"
         "High": utils.ASD_COLOR # "#FF0000"
     }
@@ -478,7 +478,8 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     }
 
     plt.rcParams.update({
-        "axes.prop_cycle": plt.cycler("color", [colors["Default"], colors["Low"], colors["High"]]),
+        # "axes.prop_cycle": plt.cycler("color", [colors["Default"], colors["Low"], colors["High"]]),
+        "axes.prop_cycle": plt.cycler("color", [colors["Low"], colors["High"]]),
         "axes.labelsize": 11,
         "axes.titlesize": 12,
         "legend.frameon": False
@@ -486,7 +487,8 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
 
     # --- Train or load results ---
     results, model_paths = {}, {}
-    names = {"Default": cfg_def, "Low": cfg_low, "High": cfg_high}
+    # names = {"Default": cfg_def, "Low": cfg_low, "High": cfg_high}
+    names = {"Low": cfg_low, "High": cfg_high}
 
     for label, cfg in names.items():
         # unique hash from config (sorted)
@@ -618,13 +620,13 @@ if __name__ == "__main__":
     print(f"Training on device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # Parameter grid
-    M_states_list = [4, 5]  # [4, 5, 6]
-    K_symbols_list = [8, 12]
-    L_input_list = [15]  # [7, 11, 15]
-    D_delay_list = [30, 60]  # [10, 15, 20]
+    M_states_list = [5]  # [4, 5, 6]
+    K_symbols_list = [12]
+    L_input_list = [10]  # [7, 11, 15]
+    D_delay_list = [60]  # [10, 15, 20]
     s_transitions_list = [2]  # [2, 3]
     s_emissions_list = [2]  # [2, 3]
-    flip_prob_list = [0]  # [0.0, 0.05, 0.2]
+    flip_prob_list = [0.05]  # [0.0, 0.05, 0.2]
 
     # Create all combinations
     param_combinations = list(itertools.product(
@@ -657,7 +659,7 @@ if __name__ == "__main__":
                 flip_prob=flip,
                 ood_rewire_frac=1.0,
                 name="default_bias",
-                epochs=100
+                epochs=75
             )
             cfg_low = cfg_def.replace(input_gate_bias_std=low_bias, name="low_bias_std")
             cfg_high = cfg_def.replace(input_gate_bias_std=high_bias, name="high_bias_std")

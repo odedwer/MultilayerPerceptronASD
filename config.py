@@ -18,9 +18,9 @@ class RNNConfig:
     s_emissions: int = 4
     flip_prob: float = 0.00
     ood_rewire_frac: float = 0.4
-    n_train: int = 10000
+    n_train: int = 15000
     n_val: int = 500
-    n_test: int = 1000
+    n_test: int = 2000
 
     # Model
     name: str = "LSTM"
@@ -30,7 +30,7 @@ class RNNConfig:
     num_layers: int = 1
     bias_means: dict = None
     input_gate_bias_std: float = None
-    freeze_all_biases: bool = False
+    freeze_all_biases: bool = True
     freeze_input_gate_bias_only: bool = False
 
     # Training
