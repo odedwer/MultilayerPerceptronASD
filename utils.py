@@ -1,4 +1,5 @@
 from collections import defaultdict
+import os
 
 import torch
 import torch.nn as nn
@@ -14,101 +15,10 @@ from matplotlib.colors import Normalize
 from scipy.optimize import curve_fit
 from sklearn.metrics.pairwise import pairwise_distances
 from matplotlib.gridspec import GridSpec
-
+from datasets import GaussianTask
+from models import MLP
 ASD_COLOR = "#FF0000"
 NT_COLOR = "#00A08A"
-
-
-# Define the MLP model
-class MLP(nn.Module):
-    """
-    A simple MLP model with ReLU activation and Sigmoid output, that can be reinitialized and set to specific bias scale
-    """
-
-    def __init__(self, input_size, hidden_size, n_hidden, output_size, w_scale, b_scale):
-        super(MLP, self).__init__()
-        self._layers = nn.Sequential()
-        self._layers.add_module('fc1', nn.Linear(input_size, hidden_size, bias=True))
-        self._layers.add_module('activation_func1', nn.Tanh())
-        self.w_scale = w_scale
-        self.b_scale = b_scale
-        for i in range(n_hidden):
-            self._layers.add_module(f'fc{i + 2}', nn.Linear(hidden_size, hidden_size, bias=True))
-            self._layers.add_module(f'activation_func{i + 2}', nn.Tanh())
-        self._layers.add_module('fc_last', nn.Linear(hidden_size, output_size, bias=True))
-        self._layers.add_module('sigmoid', nn.Sigmoid())
-        self._handles = []
-        # self.reinitialize()
-
-    def set_activations_hook(self, activations):
-        def hook_generator(name, activations):
-            def hook(model, input, output):
-                activations[name] = output.detach().numpy()
-
-            return hook
-
-        self._handles = []
-        for name, m in self._layers.named_modules():
-            self._handles.append(m.register_forward_hook(hook_generator(name, activations)))
-
-    def remove_activations_hook(self):
-        for handle in self._handles:
-            handle.remove()
-        self._handles = []
-
-    def get_out_activation(self):
-        return self._layers[-1]
-
-    def forward(self, x):
-        return self._layers(x)
-
-    def reinitialize(self, seed=None):
-        if seed is not None:
-            torch.manual_seed(seed)
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.kaiming_normal_(m.weight)
-                nn.init.normal_(m.bias, 0, self.b_scale)
-
-
-class DataGenerator:
-    """
-    A simple data generator for creating data from multidimensional Gaussians with different means and same scale
-    """
-
-    def __init__(self, emb_dim, n_gaussians, locs, scales, labels=None):
-        self.emb_dim = emb_dim
-        self.n_gaussians = n_gaussians
-        self.locs = np.array(locs)
-        self.scales = scales
-        self.labels = labels if labels is not None else list(range(n_gaussians))
-
-    def create(self, n_samples):
-        x = []
-        y = []
-        for i in range(self.n_gaussians):
-            x.append(torch.randn(n_samples, self.emb_dim) * self.scales[i] + self.locs[i])
-            y.append(torch.ones(n_samples) * self.labels[i])
-
-        return torch.vstack(x), torch.hstack(y)[:, None]
-
-    def project_data(self, x):
-        if self.emb_dim == 1:
-            return x
-        proj_vec = np.repeat(self.locs[1], self.emb_dim).astype(float) - np.repeat(self.locs[0], self.emb_dim).astype(
-            float)
-        proj_vec /= np.linalg.norm(proj_vec).astype(float)  # get normalized vector for projection
-        return x @ proj_vec[:, None]
-
-    def get_centers_grid(self, n_samples):
-        alphas = np.linspace(0, 1, n_samples)
-        loc0 = self.locs[0][None] - 3 * self.scales[0]
-        loc1 = self.locs[1][None] + 3 * self.scales[1]
-        dist = loc1 - loc0
-        grid_x = loc0 + alphas[:, None] * dist
-        grid_x = np.tile(grid_x, (1, self.n_gaussians))
-        return grid_x
-
 
 def sigmoid(x, thresh, slope):
     """
@@ -121,8 +31,8 @@ def sigmoid(x, thresh, slope):
 
 
 # Initialize the model, loss function, and optimizer
-def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale,
-                X_train, y_train, X_test, y_test, dataloader, dg, grid, optimizer_type=optim.Adam, num_epochs=300):
+def train_mlp_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale,
+                    X_train, y_train, X_test, y_test, dataloader, dg, grid, optimizer_type=optim.Adam, num_epochs=300, device=None):
     """
     Create and train the model using the given arguments
     :param input_size: The dimension of the input
@@ -140,6 +50,16 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
     :param num_epochs: The number of epochs for training
     :return: The trained model, the responses, the fitted parameters, and the covariance matrices of the parameters
     """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Move data to device
+    X_train = X_train.to(device)
+    y_train = y_train.to(device)
+    X_test = X_test.to(device)
+    y_test = y_test.to(device)
+    grid_tensor = torch.tensor(grid, dtype=torch.float32, device=device)
+
     resps = []
     fit_results = []
     fit_pcov = []
@@ -147,13 +67,14 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
     x = dg.project_data(grid)
     model = MLP(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale)
     model.reinitialize(seed=42)
+    model = model.to(device)
     model.set_activations_hook(activations)
     criterion = nn.BCELoss()
     optimizer = optimizer_type(model.parameters(), lr=0.001)
     model.eval()
-    input_dist = pairwise_distances(X_train.detach().numpy())[np.triu_indices(X_train.shape[0])]
+    input_dist = pairwise_distances(X_train.cpu().detach().numpy())[np.triu_indices(X_train.shape[0])]
     with torch.no_grad():
-        resps.append(model(torch.tensor(grid, dtype=torch.float32)).detach().numpy())
+        resps.append(model(grid_tensor).cpu().detach().numpy())
         model(X_train)
         layer_distances = {k: pairwise_distances(v)[np.triu_indices(X_train.shape[0])] for k, v in activations.items()}
     model.remove_activations_hook()
@@ -161,6 +82,8 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
     # Training loop
     for epoch in tqdm(range(num_epochs), desc="Training"):
         for inputs, labels in dataloader:
+            inputs = inputs.to(device)
+            labels = labels.to(device)
             # Forward pass
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -171,7 +94,7 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
             optimizer.step()
         model.eval()
         with torch.no_grad():
-            resp = model(torch.tensor(grid, dtype=torch.float32)).detach().numpy()
+            resp = model(grid_tensor).cpu().detach().numpy()
             resps.append(resp)
             # fit the sigmoid function to the resp
 
@@ -192,7 +115,7 @@ def train_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_scale
     return model, resps, fit_results, fit_pcov, input_dist, layer_distances
 
 
-def animate_decision_through_learning(name, grid, resps, X_train, y_train, generator: DataGenerator):
+def animate_decision_through_learning(name, grid, resps, X_train, y_train, generator: GaussianTask):
     """
     Animate the 1D decision boundary through learning
     :param name: The name of the file
@@ -230,12 +153,12 @@ def animate_decision_through_learning(name, grid, resps, X_train, y_train, gener
         return line,
 
     anim = FuncAnimation(fig, animate, init_func=init, frames=tqdm(range(len(resps))), interval=500, blit=True)
-    anim.save(f"{name}.mp4", writer="ffmpeg")
-
+    os.makedirs("figures", exist_ok=True)
+    anim.save(f"figures/{name}.mp4", writer="ffmpeg")
     return anim
 
 
-def create_dataset(input_size, num_samples, loc, scale, n_gaussians=2, seed=0):
+def create_gaussian_dataset(input_size, num_samples, loc, scale, n_gaussians=2, seed=0, device=None):
     """
     Create a dataset using the DataGenerator
     :param input_size: The dimension of the input
@@ -246,11 +169,15 @@ def create_dataset(input_size, num_samples, loc, scale, n_gaussians=2, seed=0):
     :param seed: The seed for the random number generator
     :return: X_train, X_test, y_train, y_test, The DataGenerator object, grid, training data DataLoader
     """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     np.random.seed(seed)
     torch.manual_seed(seed)
-    dg = DataGenerator(input_size, n_gaussians, [-loc, loc], [scale, scale])
+    dg = GaussianTask(input_size, n_gaussians, [-loc, loc], [scale, scale])
 
     X, y = dg.create(num_samples)
+    X = X.to(device)
+    y = y.to(device)
 
     grid = dg.get_centers_grid(150)
 
@@ -262,7 +189,7 @@ def create_dataset(input_size, num_samples, loc, scale, n_gaussians=2, seed=0):
 
 
 # %% Plotting
-def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: DataGenerator, ax=None, cax=False):
+def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: GaussianTask, ax=None, cax=False):
     """
     Plot the decision boundary through learning
     :param grid: The grid on which the response was evaluated
@@ -276,6 +203,14 @@ def plot_decision_throught_learning(grid, resps, X_train, y_train, generator: Da
         ax.set_title("Decision boundary through learning")
     else:
         fig = ax.get_figure()
+    try:
+        X_train=X_train.detach().cpu().numpy()
+    except TypeError:
+        pass
+    try:
+        y_train=y_train.detach().cpu().numpy()
+    except TypeError:
+        pass
     cmap = plt.get_cmap('coolwarm')
     norm = Normalize(vmin=0, vmax=len(resps))
     for i in range(len(resps)):
@@ -435,3 +370,48 @@ def plot_decision_boundary(X_train, y_train, model, ax, title=None):
 
 def pair_distances(x):
     return np.sqrt(np.mean((x[::2] - x[1::2]) ** 2, axis=-1))
+
+
+def participation_ratio(eigvals):
+    s1, s2 = eigvals.sum(), (eigvals**2).sum()
+    return (s1**2)/(s2+1e-12)
+
+def effective_rank(S):
+    p = S/S.sum(); H = -(p*np.log(p+1e-12)).sum()
+    return np.exp(H)
+
+def pcs_to_explain(S, thr=(.8,.9,.95)):
+    csum, total = np.cumsum(S), S.sum()
+    return {f"pcs_{int(t*100)}": np.searchsorted(csum, t*total)+1 for t in thr}
+
+def covariance_spectrum(H):
+    X = H - H.mean(0, keepdims=True)
+    _, S, _ = np.linalg.svd(X, full_matrices=False)
+    eig = S**2 / (len(X)-1)
+    return eig, S
+
+def lag1_autocorr(tr):
+    X = tr - tr.mean(0)
+    num = (X[:-1]*X[1:]).mean(0)
+    den = X[:-1].std(0)*X[1:].std(0)+1e-12
+    return float(np.nanmean(num/den))
+
+def trajectory_speed(tr):
+    return torch.norm(tr[1:]-tr[:-1], dim=-1).mean().item()
+
+
+def estimate_empirical_transitions(train_dataset, M):
+    """Estimate empirical HMM transition matrix from sampled latent z sequences."""
+    counts = np.zeros((M, M))
+    for i in range(len(train_dataset)):
+        _, _, z_seq, _ = train_dataset[i]
+        z_seq = z_seq.numpy()
+        z_seq = z_seq[z_seq >= 0]
+        for t in range(len(z_seq) - 1):
+            counts[z_seq[t], z_seq[t + 1]] += 1
+    row_sums = counts.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1
+    return counts / row_sums
+
+import seaborn as sns
+

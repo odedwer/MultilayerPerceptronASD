@@ -22,7 +22,7 @@ LOC = 2
 OPTIM_TYPE = "Adam"
 
 # %%
-X_train, X_test, y_train, y_test, dg, grid, dataloader = create_dataset(INPUT_SIZE, NUM_SAMPLES, LOC, SCALE, 2)
+X_train, X_test, y_train, y_test, dg, grid, dataloader = create_gaussian_dataset(INPUT_SIZE, NUM_SAMPLES, LOC, SCALE, 2)
 model = MLP(INPUT_SIZE, HIDDEN_SIZE, N_HIDDEN, OUTPUT_SIZE, W_SCALE, B_SCALE)
 model.reinitialize(92)
 model_wide = MLP(INPUT_SIZE, HIDDEN_SIZE, N_HIDDEN, OUTPUT_SIZE, W_SCALE, B_SCALE_HIGH)
