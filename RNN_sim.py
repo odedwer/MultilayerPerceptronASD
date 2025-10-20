@@ -39,6 +39,32 @@ def run_dir_for_cfg(cfg) -> str:
     os.makedirs(path, exist_ok=True)
     return path
 
+def plot_hmm_matrices(T_train, E_train, T_test, E_test, cfg:RNNConfig, save_path=None):
+    """Plot 2x2 grid: train vs test HMM transition & emission probabilities."""
+    fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+    sns.heatmap(T_train, ax=axes[0, 0], cmap="viridis", vmin=0, vmax=1, cbar=False)
+    axes[0, 0].set_title("A. Train: State→State Transitions")
+
+    sns.heatmap(E_train, ax=axes[0, 1], cmap="viridis", vmin=0, vmax=1, cbar=False)
+    axes[0, 1].set_title("B. Train: State→Token Emissions")
+
+    sns.heatmap(T_test, ax=axes[1, 0], cmap="viridis", vmin=0, vmax=1, cbar=False)
+    axes[1, 0].set_title("C. Test: State→State Transitions")
+
+    sns.heatmap(E_test, ax=axes[1, 1], cmap="viridis", vmin=0, vmax=1, cbar=False)
+    axes[1, 1].set_title("D. Test: State→Token Emissions")
+
+    for ax_row in axes:
+        for ax in ax_row:
+            ax.set_xlabel("Next state / Token")
+            ax.set_ylabel("Current state")
+
+    fig.suptitle(f"HMM Structure for {cfg.name} (M={cfg.M_states}, K={cfg.K_symbols}, flip prob: {cfg.flip_prob})", fontsize=14)
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return fig
 
 # --- use npz files for arrays ---
 def save_run(run_dir, cfg, model, train_losses, train_metrics, final_metrics):
@@ -184,7 +210,7 @@ def probe_per_class(H_mem, labels_2d, n_classes):
 # ---------- Train ----------
 def train_model(model, train_loader, val_loader, test_loader, cfg):
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.CrossEntropyLoss(reduction='none')
     history = {k: [] for k in [
         "train_loss", "val_loss", "test_loss",
         "train_acc", "val_acc", "test_acc",
@@ -205,15 +231,19 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
             out, H = model(X)
 
             # Cross-entropy over all timesteps
-            loss = criterion(out.transpose(1, 2), Y)
+            loss_all = criterion(out.transpose(1, 2), Y)
+
+            # Apply mask: only compute over delay timesteps
+            masked_loss = loss_all[delay_mask]
+            loss = masked_loss.mean() if masked_loss.numel() > 0 else torch.tensor(0., device=cfg.device)
+
             loss.backward()
             optimizer.step()
 
             # Accuracy computation
             preds = out.argmax(-1)
-            mask = ((Y >= 0) & (Y<cfg.K_symbols))  # all valid time steps
-            total_correct += (preds[mask] == Y[mask]).sum().item()
-            total += mask.sum().item()  # ✅ ensure nonzero
+            total_correct += (preds[delay_mask] == Y[delay_mask]).sum().item()
+            total += delay_mask.sum().item()  # ✅ ensure nonzero
             total_loss += loss.item() * X.size(0)
 
             # Save for probes
@@ -412,6 +442,7 @@ def run_experiment(cfg):
     # Build data (train, val, test as before)
     T, E = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng)
     T_test = rewire_transitions(T, cfg.ood_rewire_frac, cfg.s_transitions, rng)
+    plot_hmm_matrices(T, E, T_test, E, cfg, save_path=os.path.join(run_dir, "hmm_matrices.svg"))
 
     n_val = max(cfg.n_val, 500)
     train = DelayedCopyHMM(cfg.n_train, T, E, cfg, rng)
@@ -491,6 +522,21 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     results, model_paths = {}, {}
     # names = {"Default": cfg_def, "Low": cfg_low, "High": cfg_high}
     names = {"Low": cfg_low, "High": cfg_high}
+    rng = np.random.RandomState(cfg_def.seed)
+    T, E = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions, rng)
+    T_test = rewire_transitions(T, cfg_def.ood_rewire_frac, cfg_def.s_transitions, rng)
+
+    plot_hmm_matrices(T, E, T_test, E, cfg_def, save_path="hmm_matrices_comparison.svg")
+
+    train = DelayedCopyHMM(cfg_def.n_train, T, E, cfg_def, rng)
+    val = DelayedCopyHMM(cfg_def.n_val, T, E, cfg_def, rng)
+    test = DelayedCopyHMM(cfg_def.n_test, T_test, E, cfg_def, rng)
+
+    loaders = [
+        torch.utils.data.DataLoader(ds, batch_size=cfg_def.batch_size, shuffle=(i == 0))
+        for i, ds in enumerate([train, val, test])
+    ]
+    train_loader, val_loader, test_loader = loaders
 
     for label, cfg in names.items():
         # unique hash from config (sorted)
@@ -512,20 +558,6 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
             continue
 
         # === No cache found: train model ===
-        print(f"\n🚀 Training {label} model ({cfg_hash})")
-        rng = np.random.RandomState(cfg.seed)
-        T, E = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng)
-        T_test = rewire_transitions(T, cfg.ood_rewire_frac, cfg.s_transitions, rng)
-
-        train = DelayedCopyHMM(cfg.n_train, T, E, cfg, rng)
-        val = DelayedCopyHMM(cfg.n_val, T, E, cfg, rng)
-        test = DelayedCopyHMM(cfg.n_test, T_test, E, cfg, rng)
-
-        loaders = [
-            torch.utils.data.DataLoader(ds, batch_size=cfg.batch_size, shuffle=(i == 0))
-            for i, ds in enumerate([train, val, test])
-        ]
-        train_loader, val_loader, test_loader = loaders
 
         model = LSTMWithGateBias(cfg.K_symbols + 2, cfg.emb_dim, cfg.hidden_size, cfg).to(cfg.device)
 
@@ -606,7 +638,7 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
             for label, path in model_paths.items()
         ]
     }
-    with open(os.path.join("results","summary_index.json"), "w") as f:
+    with open(os.path.join("results",f"summary_index_{timestamp}.json"), "w") as f:
         json.dump(summary_index, f, indent=2)
 
     print(f"\n✅ Summary saved as: {summary_path}")
@@ -624,9 +656,9 @@ if __name__ == "__main__":
 
     # Parameter grid
     M_states_list = [4]  # [4, 5, 6]
-    K_symbols_list = [7, 9, 12]
-    L_input_list = [10, 15]  # [7, 11, 15]
-    D_delay_list = [20, 40, 60]  # [10, 15, 20]
+    K_symbols_list = [7]
+    L_input_list = [10]  # [7, 11, 15]
+    D_delay_list = [40]  # [10, 15, 20]
     s_transitions_list = [2]  # [2, 3]
     s_emissions_list = [3]  # [2, 3]
     flip_prob_list = [0.05]  # [0.0, 0.05, 0.2]
@@ -644,7 +676,7 @@ if __name__ == "__main__":
 
     low_high_combs = [
         # (0.1, 5.0),
-        (.1, 10.)
+        (1., 10.)
     ]
 
     # Run experiments for each combination

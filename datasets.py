@@ -106,15 +106,15 @@ class DelayedCopyHMM(Dataset):
         x_true[:L] = x_inp  # true input symbols
 
         # Boolean mask marking delay timesteps
-        delay_mask = np.zeros_like(inp, dtype=np.int64)
-        delay_mask[L:L + D] = 1  # mark delay period only
+        delay_mask = np.zeros_like(inp, dtype=bool)
+        delay_mask[L+D+1:] = True  # mark delay period only
 
         return (
             torch.tensor(inp, dtype=torch.long),
             torch.tensor(tgt, dtype=torch.long),
             torch.tensor(z_full, dtype=torch.long),
             torch.tensor(x_true, dtype=torch.long),
-            torch.tensor(delay_mask, dtype=torch.long)
+            torch.tensor(delay_mask, dtype=torch.bool)
         )
 
 
