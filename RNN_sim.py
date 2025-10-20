@@ -524,13 +524,13 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     names = {"Low": cfg_low, "High": cfg_high}
     rng = np.random.RandomState(cfg_def.seed)
     T, E = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions, rng)
-    T_test = rewire_transitions(T, cfg_def.ood_rewire_frac, cfg_def.s_transitions, rng)
+    T_test, E_test = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions, np.random.RandomState(cfg_def.seed+7))
 
     plot_hmm_matrices(T, E, T_test, E, cfg_def, save_path="hmm_matrices_comparison.svg")
 
     train = DelayedCopyHMM(cfg_def.n_train, T, E, cfg_def, rng)
     val = DelayedCopyHMM(cfg_def.n_val, T, E, cfg_def, rng)
-    test = DelayedCopyHMM(cfg_def.n_test, T_test, E, cfg_def, rng)
+    test = DelayedCopyHMM(cfg_def.n_test, T_test, E_test, cfg_def, rng)
 
     loaders = [
         torch.utils.data.DataLoader(ds, batch_size=cfg_def.batch_size, shuffle=(i == 0))
