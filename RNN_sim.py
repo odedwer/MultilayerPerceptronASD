@@ -133,80 +133,52 @@ def compute_dimensionality(H, eps=1e-12):
     return pcs80, pcs90, pcs95, eff_rank
 
 # ---------- Linear Probe ----------
-def train_linear_probe(H, y, out_dim, cfg, l2=1e-3):
-    """Closed-form ridge classifier with bias & centering (used for all probes)."""
-    device = cfg.device
-    mask = y >= 0
-    X = H[mask].to(device)
-    Y = y[mask].to(device)
-    if X.numel() == 0:
-        return float("nan")
+# ---------- Helper: Linear Probe ----------
+@torch.no_grad()
+def get_probe_acc(X, Y, out_dim, device, l2=1e-3):
+    """
+    Trains a closed-form ridge classifier and returns a boolean tensor
+    of correct predictions.
+    X: (N_samples, H_dim) - Features
+    Y: (N_samples,) - Labels
+    out_dim: int - Number of classes
+    """
+    # Ensure Y is long
+    Y = Y.long()
 
-    N = X.size(0)
-    torch.manual_seed(cfg.seed)
-    idx = torch.randperm(N, device=device)
-    ntr = int(0.8 * N)
-    Xtr, Xval = X[idx[:ntr]], X[idx[ntr:]]
-    Ytr, Yval = Y[idx[:ntr]], Y[idx[ntr:]]
+    # One-hot targets
+    T = torch.zeros((X.size(0), out_dim), device=device)
+    T[torch.arange(X.size(0)), Y] = 1.0
 
-    # one-hot targets
-    T = torch.zeros((Xtr.size(0), out_dim), device=device)
-    T[torch.arange(Xtr.size(0), device=device), Ytr] = 1.0
+    # Centering
+    mu = X.mean(0, keepdim=True)
+    X_c = X - mu
 
-    mu = Xtr.mean(0, keepdim=True)
-    Xtr_c, Xval_c = Xtr - mu, Xval - mu
-    ones_tr = torch.ones(Xtr_c.size(0), 1, device=device)
-    ones_val = torch.ones(Xval_c.size(0), 1, device=device)
-    Xtr_aug = torch.cat([Xtr_c, ones_tr], 1)
-    Xval_aug = torch.cat([Xval_c, ones_val], 1)
+    # Add bias term
+    ones = torch.ones(X_c.size(0), 1, device=device)
+    X_aug = torch.cat([X_c, ones], 1)
 
-    Hdim = Xtr_c.size(1)
+    # Solve for weights (Ridge Regression)
+    Hdim = X_c.size(1)
     I = torch.eye(Hdim + 1, device=device)
-    I[-1, -1] = 0.0
-    W = torch.linalg.solve(Xtr_aug.T @ Xtr_aug + l2 * I, Xtr_aug.T @ T)
+    I[-1, -1] = 0.0  # No regularization on bias
 
-    pred = (Xval_aug @ W).argmax(-1)
-    return (pred == Yval).float().mean().item()
-# ---------- Train & Evaluate ----------
+    try:
+        W = torch.linalg.solve(X_aug.T @ X_aug + l2 * I, X_aug.T @ T)
+    except torch.linalg.LinAlgError:
+        print("[warn] Probe solver failed, returning nan.")
+        return torch.tensor([False] * X.size(0), device=device)
+
+    # Get predictions
+    Preds = (X_aug @ W).argmax(-1)
+    Correct = (Preds == Y)
+    return Correct# ---------- Train & Evaluate ----------
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 
-def probe_per_class(H_mem, labels_2d, n_classes):
-    """
-    For each sequence, take one memory vector and all unique labels (states or tokens)
-    that appeared during the input phase, then probe across all such pairs.
-    """
-    H_list, y_list = [], []
-    H_mem_np = H_mem.detach().cpu().numpy()
-    labels_np = labels_2d.detach().cpu().numpy()
 
-    for i in range(H_mem_np.shape[0]):  # iterate over sequences
-        unique_labels = np.unique(labels_np[i][labels_np[i] >= 0])
-        for label in unique_labels:
-            H_list.append(H_mem_np[i])
-            y_list.append(label)
-
-    if len(y_list) == 0:
-        return np.nan
-
-    H_stack = np.stack(H_list)
-    y_stack = np.array(y_list)
-
-    scores = []
-    for label in np.unique(y_stack):
-        mask = (y_stack == label)
-        if mask.sum() < 5:
-            continue
-        clf = LogisticRegression(max_iter=500, n_jobs=-1)
-        scaler = StandardScaler()
-        H = scaler.fit_transform(H_stack)
-        clf.fit(H, (y_stack == label).astype(int))
-        pred = clf.predict(H)
-        scores.append(f1_score((y_stack == label).astype(int), pred))
-
-    return float(np.mean(scores)) if scores else np.nan
-
+# ---------- Train ----------
 # ---------- Train ----------
 def train_model(model, train_loader, val_loader, test_loader, cfg):
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
@@ -214,15 +186,20 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
     history = {k: [] for k in [
         "train_loss", "val_loss", "test_loss",
         "train_acc", "val_acc", "test_acc",
-        "probe_hmm", "probe_token", "probe_baseline",
-        "pcs80", "pcs90", "pcs95", "eff_rank"
+        "probe_hmm_avg", "probe_hmm_max",  # <-- New keys
+        "probe_token", "probe_baseline",
+        "pcs80_in", "pcs90_in", "pcs95_in", "eff_in",
+        "pcs80_dl", "pcs90_dl", "pcs95_dl", "eff_dl",
+        "pcs80_out", "pcs90_out", "pcs95_out", "eff_out"
     ]}
 
     for epoch in range(cfg.epochs):
         model.train()
         total_loss, total_correct, total = 0.0, 0, 0
-        # Each batch returns 5 items, including y_delay
-        X_all, H_all, Z_all, Y_all, delay_masks = [], [], [], [],[]
+
+        # Lists to collect data for probes
+        H_repro_all, Z_labels_all = [], []
+        H_for_pca = []  # For PCA
 
         for X, Y, Z, _, delay_mask in train_loader:
             X, Y, Z, delay_mask = X.to(cfg.device), Y.to(cfg.device), Z.to(cfg.device), delay_mask.to(cfg.device)
@@ -233,72 +210,62 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
             # Cross-entropy over all timesteps
             loss_all = criterion(out.transpose(1, 2), Y)
 
-            # Apply mask: only compute over delay timesteps
+            # Apply mask: only compute over reproduction timesteps
             masked_loss = loss_all[delay_mask]
             loss = masked_loss.mean() if masked_loss.numel() > 0 else torch.tensor(0., device=cfg.device)
 
-            loss.backward()
-            optimizer.step()
+            if masked_loss.numel() > 0:
+                loss.backward()
+                optimizer.step()
 
             # Accuracy computation
             preds = out.argmax(-1)
             total_correct += (preds[delay_mask] == Y[delay_mask]).sum().item()
-            total += delay_mask.sum().item()  # ✅ ensure nonzero
+            total += delay_mask.sum().item()
             total_loss += loss.item() * X.size(0)
 
-            # Save for probes
-            H_all.append(H.detach())
-            # Z_all.append(Z.detach().cpu())
-            # Y_all.append(Y.detach().cpu())
-            # X_all.append(X.detach().cpu())
-            # delay_masks.append(delay_mask.detach().cpu())
+            # --- Save for probes and PCA ---
+            if delay_mask.any():
+                # H for HMM probe (from reproduction phase)
+                H_repro_all.append(H[delay_mask].detach().cpu())
+                # Z labels for HMM probe (from input phase)
+                Z_labels_all.append(Z[:, :cfg.L_input].flatten().detach().cpu())
+
+            # H for PCA (all phases)
+            H_for_pca.append(H.detach().cpu())
 
         # aggregate
         train_loss = total_loss / len(train_loader.dataset)
-        train_acc = total_correct / total if total > 0 else 0.0  # ✅ safe guard
+        train_acc = total_correct / total if total > 0 else 0.0
 
-        # Flatten over batches
-        H_all = torch.cat([a.cpu() for a in H_all], 0)
-        # Z_all = torch.cat(Z_all, 0)
-        # Y_all = torch.cat(Y_all, 0)
-        # X_all = torch.cat(X_all, 0)
-        # delay_masks = torch.cat(delay_masks, 0)  # (batch, time)
+        # --- HMM State Probe (Avg & Max) ---
+        probe_hmm_avg, probe_hmm_max = np.nan, np.nan
+        if H_repro_all:
+            H_repro = torch.cat(H_repro_all, 0).to(cfg.device)
+            Z_repro_labels = torch.cat(Z_labels_all, 0).to(cfg.device)
+            L, M = cfg.L_input, cfg.M_states
 
-        # H_mem = H_all[:, cfg.L_input + cfg.D_delay - 1]
-        # ---- Extract input-phase labels ----
-        # Z_input = Z_all[:, :cfg.L_input]
-        # X_input = X_all[:, :cfg.L_input]
+            N_samples = H_repro.shape[0]
+            if N_samples > L:
+                N_seqs = N_samples // L
+                # Trim to full sequences
+                H_repro = H_repro[:N_seqs * L]
+                Z_repro_labels = Z_repro_labels[:N_seqs * L]
 
-        # ---- Compute per-class decoding with unique label aggregation ----
-        # probe_hmm = probe_per_class(H_mem, Z_input, cfg.M_states)
-        # probe_token = probe_per_class(H_mem, X_input, cfg.K_symbols)
+                # Get boolean tensor of correctness
+                Correct_flat = get_probe_acc(H_repro, Z_repro_labels, M, cfg.device)
 
-        # ---- Baseline: token → HMM structure ----
-        # X_unique_vectors, Z_unique_labels = [], []
-        # X_np, Z_np = X_input.cpu().numpy(), Z_input.cpu().numpy()
-        # for i in range(X_np.shape[0]):
-        #     unique_tokens = np.unique(X_np[i][X_np[i] >= 0])
-        #     for token in unique_tokens:
-        #         X_unique_vectors.append(np.eye(cfg.K_symbols)[token])
-        #         Z_unique_labels.append(np.argmax(np.bincount(Z_np[i][Z_np[i] >= 0])))
-        # if len(Z_unique_labels) > 0:
-        #     onehot_X = np.stack(X_unique_vectors)
-        #     y_base = np.array(Z_unique_labels)
-        #     scores = []
-        #     for label in np.unique(y_base):
-        #         mask = (y_base == label)
-        #         if mask.sum() < 5:
-        #             continue
-        #         clf = LogisticRegression(max_iter=500, n_jobs=-1)
-        #         clf.fit(onehot_X, (y_base == label).astype(int))
-        #         pred = clf.predict(onehot_X)
-        #         scores.append(f1_score((y_base == label).astype(int), pred))
-        #     probe_baseline = float(np.mean(scores)) if scores else np.nan
-        # else:
-        #     probe_baseline = np.nan
+                # Reshape to (N_seqs, L)
+                Correct_by_seq = Correct_flat.view(N_seqs, L)
+
+                # Get accuracy at each reproduction timestep
+                Correct_by_time = Correct_by_seq.float().mean(dim=0)
+
+                probe_hmm_avg = Correct_by_time.mean().item()
+                probe_hmm_max = Correct_by_time.max().item()
 
         # --- Compute PCA metrics (effective dimensionality) per phase ---
-        H_np = H_all.detach().cpu()
+        H_np = torch.cat(H_for_pca, 0).numpy()
 
         # Define phase boundaries
         L, D = cfg.L_input, cfg.D_delay
@@ -311,14 +278,16 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
 
         phase_dims = {}
         for phase, (start, end) in phase_indices.items():
-            if end <= start or end > T_total:
+            if end <= start or end > T_total or start >= T_total:
                 phase_dims[phase] = (np.nan, np.nan, np.nan, np.nan)
                 continue
             H_phase = H_np[:, start:end, :].reshape(-1, H_np.shape[-1])
             # --- Subsample to limit computation ---
             if H_phase.shape[0] > cfg.pca_sample_size:
                 idx = torch.randperm(H_phase.shape[0])[:cfg.pca_sample_size]
-                H_phase = H_phase[idx]
+                H_phase = torch.from_numpy(H_phase[idx.numpy()])
+            else:
+                H_phase = torch.from_numpy(H_phase)
 
             phase_dims[phase] = compute_dimensionality(H_phase.detach().clone())
 
@@ -330,32 +299,22 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
         # --- validation and test (only accuracy & loss)
         val_metrics = evaluate(model, val_loader, cfg)
         test_metrics = evaluate(model, test_loader, cfg)
-        # if (epoch) % cfg.test_eval_interval == 0:
-        #     test_metrics = evaluate(model, test_loader, cfg)
-        # else:
-        #     test_metrics = {"loss": np.nan, "acc": np.nan}
-
 
         # --- store metrics
-        for key in [
-            "train_loss", "val_loss", "test_loss",
-            "train_acc", "val_acc", "test_acc",
-            "probe_hmm", "probe_token", "probe_baseline",
-            "pcs80_in", "pcs90_in", "pcs95_in", "eff_in",
-            "pcs80_dl", "pcs90_dl", "pcs95_dl", "eff_dl",
-            "pcs80_out", "pcs90_out", "pcs95_out", "eff_out"
-        ]:
-            history.setdefault(key, [])
-
         history["train_loss"].append(train_loss)
         history["train_acc"].append(train_acc)
         history["val_loss"].append(val_metrics["loss"])
         history["val_acc"].append(val_metrics["acc"])
         history["test_loss"].append(test_metrics["loss"])
         history["test_acc"].append(test_metrics["acc"])
-        history["probe_hmm"].append(np.nan)#probe_hmm)
-        history["probe_token"].append(np.nan)#probe_token)
-        history["probe_baseline"].append(np.nan)#probe_baseline)
+
+        # Store probe metrics
+        history["probe_hmm_avg"].append(probe_hmm_avg)
+        history["probe_hmm_max"].append(probe_hmm_max)
+        history["probe_token"].append(np.nan)  # Not implemented
+        history["probe_baseline"].append(np.nan)  # Not implemented
+
+        # Store PCA metrics
         history["pcs80_in"].append(pcs80_in)
         history["pcs90_in"].append(pcs90_in)
         history["pcs95_in"].append(pcs95_in)
@@ -372,10 +331,10 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
         history["eff_out"].append(eff_out)
 
         print(
-            f"Epoch {epoch+1:03d} | "
+            f"Epoch {epoch + 1:03d} | "
             f"Loss={train_loss:.3f} | Acc={train_acc:.3f} | "
             f"ValAcc={val_metrics['acc']:.3f} | TestAcc={test_metrics['acc']:.3f} | "
-            # f"HMMProbe={probe_hmm:.3f} | TokenProbe={probe_token:.3f}"
+            f"HMM(avg)={probe_hmm_avg:.3f} | HMM(max)={probe_hmm_max:.3f}"
         )
 
     return history
@@ -490,6 +449,7 @@ def run_experiment(cfg):
 
 
 # ---------- Main ----------
+# ---------- Main ----------
 def run_comparison(cfg_def, cfg_low, cfg_high):
     """
     Train and compare default, low-var, and high-var models with full diagnostics,
@@ -597,23 +557,27 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     ax[2].set_xlabel("Epoch"); ax[2].set_ylabel("Accuracy"); ax[2].legend()
 
     # === D: PCs for 95% Explained Variance (per phase) ===
-    epochs = np.arange(len(history["pcs95_dl"]))
+    epochs_pca = np.arange(len(history["pcs95_dl"]))
     for label in results:
         hist = results[label]
         for (ph,phase), style in PHASE_STYLES.items():
             style.update({"color": colors[label], "lw": 2})
-            ax[3].plot(epochs, hist[f"pcs95_{ph}"], label=phase.capitalize(), **style)
+            ax[3].plot(epochs_pca, hist[f"pcs95_{ph}"], label=f"{label} {phase.capitalize()}", **style)
 
     ax[3].set_title("D) #PCs for 95% Explained Variance", loc="left", weight="bold")
     ax[3].set_xlabel("Epoch")
     ax[3].set_ylabel("# Principal Components")
-    ax[3].legend(frameon=False)
+    # Tidy up legend
+    handles, labels = ax[3].get_legend_handles_labels()
+    unique_labels = dict(zip(labels, handles))
+    ax[3].legend(unique_labels.values(), unique_labels.keys(), frameon=False, ncol=2)
 
-    # E. HMM Probe (+ baseline)
+
+    # E. HMM Probe (Avg & Max)
     for label in results:
-        ax[4].plot(epochs, results[label]["probe_hmm"], "-", color=colors[label], lw=2, label=f"{label} HMM")
-        ax[4].plot(epochs, results[label]["probe_baseline"], "--", color=colors[label], lw=1.5, label=f"{label} baseline")
-    ax[4].set_title("E. HMM Probe Accuracy (Train) + Token→State Baseline")
+        ax[4].plot(epochs, results[label]["probe_hmm_avg"], "-", color=colors[label], lw=2, label=f"{label} HMM (Avg)")
+        ax[4].plot(epochs, results[label]["probe_hmm_max"], ":", color=colors[label], lw=1.5, label=f"{label} HMM (Max)")
+    ax[4].set_title("E. HMM Probe Accuracy (Reproduction Phase)")
     ax[4].set_xlabel("Epoch"); ax[4].set_ylabel("Accuracy"); ax[4].legend()
 
     # F. Token Probe
@@ -622,13 +586,15 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     ax[5].set_title("F. Token Probe Accuracy (Train)")
     ax[5].set_xlabel("Epoch"); ax[5].set_ylabel("Accuracy"); ax[5].legend()
 
-    fig.suptitle("Model Comparisons: Default (yellow) | Low Var (teal) | High Var (red)", fontsize=14, y=1.02)
+    fig.suptitle("Model Comparisons: Low Var (teal) | High Var (red)", fontsize=14, y=1.02)
     plt.tight_layout()
 
     # --- Save figure and index ---
     timestamp = int(time.time())
     summary_path = f"summary_grid_{timestamp}.svg"
-    plt.savefig(os.path.join("results",summary_path), dpi=300, bbox_inches="tight")
+    results_dir = "results"
+    os.makedirs(results_dir, exist_ok=True)
+    plt.savefig(os.path.join(results_dir, summary_path), dpi=300, bbox_inches="tight")
     plt.show()
 
     summary_index = {
@@ -638,15 +604,14 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
             for label, path in model_paths.items()
         ]
     }
-    with open(os.path.join("results",f"summary_index_{timestamp}.json"), "w") as f:
+    with open(os.path.join(results_dir, f"summary_index_{timestamp}.json"), "w") as f:
         json.dump(summary_index, f, indent=2)
 
     print(f"\n✅ Summary saved as: {summary_path}")
-    print("✅ Index written to: summary_index.json")
+    print(f"✅ Index written to: {os.path.join(results_dir, f'summary_index_{timestamp}.json')}")
     print("✅ Reused runs:", [label for label in results if os.path.exists(os.path.join(model_paths[label], 'history.npz'))])
 
     return results
-
 
 
 

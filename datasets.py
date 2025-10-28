@@ -15,14 +15,14 @@ def make_sparse_hmm(M, K, s_trans, s_emit, rng):
     T = np.zeros((M, M))
     for i in range(M):
         succ = rng.choice(M, s_trans, replace=False)
-        w = rng.rand(s_trans) + 1e-2
+        w = rng.rand(s_trans)
         T[i, succ] = w
     T = normalize_rows(T)
 
     E = np.zeros((M, K))
     for i in range(M):
         sym = rng.choice(K, s_emit, replace=False)
-        w = rng.rand(s_emit) + 1e-2
+        w = rng.rand(s_emit)
         E[i, sym] = w
     E = normalize_rows(E)
     return T, E
@@ -34,7 +34,7 @@ def rewire_transitions(T, frac_rows, s_trans, rng):
     rows = rng.choice(T.shape[0], size=n_rows, replace=False)
     for i in rows:
         succ = rng.choice(T.shape[0], s_trans, replace=False)
-        w = rng.rand(s_trans) + 1e-2
+        w = rng.rand(s_trans)
         T2[i, :] = 0.0
         T2[i, succ] = w
     return normalize_rows(T2)

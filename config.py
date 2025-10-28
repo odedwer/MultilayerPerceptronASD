@@ -24,13 +24,13 @@ class RNNConfig:
 
     # Model
     name: str = "LSTM"
-    emb_dim: int = 32
+    emb_dim: int = 16
     use_onehot: bool = False
     hidden_size: int = 128
     num_layers: int = 1
     bias_means: dict = None
     input_gate_bias_std: float = None
-    freeze_all_biases: bool = True
+    freeze_all_biases: bool = False
     freeze_input_gate_bias_only: bool = False
 
     # Training
