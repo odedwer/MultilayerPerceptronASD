@@ -110,9 +110,11 @@ class LSTMWithGateBias(nn.Module):
                     H = self.hidden_size
                     # LSTM gates: input, forget, cell, output
                     i_gate = slice(0, H)
+                    h_gate = slice(3*H, 4*H)
                     p[H:2 * H].fill_(1.0)  # forget gate mean
                     if std and std > 0:
                         p[i_gate].normal_(mean, std)
+                        p[h_gate].normal_(mean, std)
 
         if freeze:
             for name, p in self.lstm.named_parameters():
@@ -132,6 +134,83 @@ class LSTMWithGateBias(nn.Module):
 
         # Forward through LSTM
         h, _ = self.lstm(emb)
+
+        # Predict output logits
+        y = self.readout(h)  # (B, T, K_symbols)
+
+        return y, h
+
+
+import torch
+import torch.nn as nn
+
+class RNNWithGateBias(nn.Module):
+    """
+    Standard RNN model that uses an embedding layer for symbol inputs.
+
+    - Input tokens are integer indices: 0..K_symbols-1 (symbols), K_symbols (blank), K_symbols+1 (go)
+    - Uses nn.Embedding instead of one-hot encodings.
+    - Only the input-to-hidden bias (bias_ih) is initialized differently (mean/std from cfg).
+    - All other weights and biases remain at PyTorch defaults.
+    """
+
+    def __init__(self, input_dim, emb_dim, hidden_size, cfg):
+        super().__init__()
+        self.cfg = cfg
+        self.input_dim = input_dim  # +2 for blank and go tokens
+        self.emb_dim = emb_dim
+        self.hidden_size = hidden_size
+
+        # Embedding for all tokens (symbols + blank + go)
+        self.embedding = nn.Embedding(input_dim, emb_dim)
+
+        # Standard RNN
+        self.rnn = nn.RNN(
+            input_size=emb_dim,
+            hidden_size=hidden_size,
+            num_layers=getattr(cfg, "num_layers", 1),
+            batch_first=True,
+            # nonlinearity='tanh' is the default
+        )
+
+        # Output layer (predict over K_symbols, not including blank/go)
+        self.readout = nn.Linear(hidden_size, cfg.K_symbols)
+
+        # Custom initialization for input-to-hidden bias
+        self._init_bias()
+
+    # ----------------------------------------------------------------------
+    def _init_bias(self):
+        """Modify only the input-to-hidden bias (bias_ih)."""
+        std = getattr(self.cfg, "input_gate_bias_std", 0.0)
+        mean = getattr(self.cfg, "input_gate_bias_mean", 0.0)
+        freeze = getattr(self.cfg, "freeze_all_biases", False)
+
+        with torch.no_grad():
+            for name, p in self.rnn.named_parameters():
+                if "bias_ih" in name or "bias_hh":
+                    if std and std > 0:
+                        p.normal_(mean, std)
+
+        if freeze:
+            for name, p in self.rnn.named_parameters():
+                if "bias" in name:
+                    p.requires_grad_(False)
+
+    # ----------------------------------------------------------------------
+    def forward(self, x):
+        """
+        x: LongTensor of shape (batch, seq_len)
+           Tokens: 0..K_symbols-1 = real symbols
+                    K_symbols     = blank token
+                    K_symbols+1   = go cue
+        """
+        # Embed the sequence
+        emb = self.embedding(x)  # (B, T, emb_dim)
+
+        # Forward through RNN
+        # h contains all hidden states for the sequence
+        h, _ = self.rnn(emb)
 
         # Predict output logits
         y = self.readout(h)  # (B, T, K_symbols)

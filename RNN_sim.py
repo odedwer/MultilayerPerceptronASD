@@ -1,4 +1,5 @@
 # RNN_sim.py
+from torch.amp import GradScaler, autocast
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -17,7 +18,7 @@ import seaborn as sns
 import os, json, hashlib, time
 from dataclasses import asdict
 import itertools
-
+scaler = GradScaler()
 
 def cfg_to_ordered_json(cfg) -> str:
     """Convert config dataclass to stable JSON string for hashing."""
@@ -205,18 +206,21 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
             X, Y, Z, delay_mask = X.to(cfg.device), Y.to(cfg.device), Z.to(cfg.device), delay_mask.to(cfg.device)
 
             optimizer.zero_grad()
-            out, H = model(X)
+            with autocast(device_type='cuda'):
+                out, H = model(X)
 
-            # Cross-entropy over all timesteps
-            loss_all = criterion(out.transpose(1, 2), Y)
+                # Cross-entropy over all timesteps
+                loss_all = criterion(out.transpose(1, 2), Y)
 
-            # Apply mask: only compute over reproduction timesteps
-            masked_loss = loss_all[delay_mask]
-            loss = masked_loss.mean() if masked_loss.numel() > 0 else torch.tensor(0., device=cfg.device)
+                # Apply mask: only compute over reproduction timesteps
+                masked_loss = loss_all[delay_mask]
+                loss = masked_loss.mean() if masked_loss.numel() > 0 else torch.tensor(0., device=cfg.device)
 
             if masked_loss.numel() > 0:
-                loss.backward()
-                optimizer.step()
+                scaler.scale(loss).backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
 
             # Accuracy computation
             preds = out.argmax(-1)
@@ -263,10 +267,10 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
 
                 probe_hmm_avg = Correct_by_time.mean().item()
                 probe_hmm_max = Correct_by_time.max().item()
-
-        # --- Compute PCA metrics (effective dimensionality) per phase ---
+        #
+        # # --- Compute PCA metrics (effective dimensionality) per phase ---
         H_np = torch.cat(H_for_pca, 0).numpy()
-
+        #
         # Define phase boundaries
         L, D = cfg.L_input, cfg.D_delay
         T_total = H_np.shape[1]
@@ -275,7 +279,7 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
             "delay": (L, L + D),
             "output": (L + D + 1, T_total)
         }
-
+        #
         phase_dims = {}
         for phase, (start, end) in phase_indices.items():
             if end <= start or end > T_total or start >= T_total:
@@ -290,8 +294,8 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
                 H_phase = torch.from_numpy(H_phase)
 
             phase_dims[phase] = compute_dimensionality(H_phase.detach().clone())
-
-        # unpack into variables for logging
+        #
+        # # unpack into variables for logging
         pcs80_in, pcs90_in, pcs95_in, eff_in = phase_dims["input"]
         pcs80_dl, pcs90_dl, pcs95_dl, eff_dl = phase_dims["delay"]
         pcs80_out, pcs90_out, pcs95_out, eff_out = phase_dims["output"]
@@ -333,7 +337,8 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
         print(
             f"Epoch {epoch + 1:03d} | "
             f"Loss={train_loss:.3f} | Acc={train_acc:.3f} | "
-            f"ValAcc={val_metrics['acc']:.3f} | TestAcc={test_metrics['acc']:.3f} | "
+            f"ValAcc={val_metrics['acc']:.3f} | "
+            f"TestAcc={test_metrics['acc']:.3f} | "
             f"HMM(avg)={probe_hmm_avg:.3f} | HMM(max)={probe_hmm_max:.3f}"
         )
 
@@ -520,6 +525,11 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
         # === No cache found: train model ===
 
         model = LSTMWithGateBias(cfg.K_symbols + 2, cfg.emb_dim, cfg.hidden_size, cfg).to(cfg.device)
+        # compile model
+        try:
+            model = torch.compile(model, mode="reduce-overhead")
+        except Exception:
+            pass
 
         history = train_model(model, train_loader, val_loader, test_loader, cfg)
         results[label] = history
@@ -551,8 +561,9 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     ax[1].set_xlabel("Epoch"); ax[1].set_ylabel("Accuracy"); ax[1].legend()
 
     # C. Test Accuracy (OOD)
+    epochs_test = np.arange(len(results[label]["test_acc"]))
     for label in results:
-        ax[2].plot(epochs, results[label]["test_acc"], color=colors[label], lw=2, label=label)
+        ax[2].plot(epochs_test, results[label]["test_acc"], color=colors[label], lw=2, label=label)
     ax[2].set_title("C. Test Accuracy (OOD → memorization)")
     ax[2].set_xlabel("Epoch"); ax[2].set_ylabel("Accuracy"); ax[2].legend()
 
@@ -574,15 +585,17 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
 
 
     # E. HMM Probe (Avg & Max)
+    epochs_hmm = np.arange(len(results[label]["probe_hmm_avg"]))
     for label in results:
-        ax[4].plot(epochs, results[label]["probe_hmm_avg"], "-", color=colors[label], lw=2, label=f"{label} HMM (Avg)")
-        ax[4].plot(epochs, results[label]["probe_hmm_max"], ":", color=colors[label], lw=1.5, label=f"{label} HMM (Max)")
+        ax[4].plot(epochs_hmm, results[label]["probe_hmm_avg"], "-", color=colors[label], lw=2, label=f"{label} HMM (Avg)")
+        ax[4].plot(epochs_hmm, results[label]["probe_hmm_max"], ":", color=colors[label], lw=1.5, label=f"{label} HMM (Max)")
     ax[4].set_title("E. HMM Probe Accuracy (Reproduction Phase)")
     ax[4].set_xlabel("Epoch"); ax[4].set_ylabel("Accuracy"); ax[4].legend()
 
     # F. Token Probe
+    epochs_token = np.arange(len(results[label]["probe_token"]))
     for label in results:
-        ax[5].plot(epochs, results[label]["probe_token"], color=colors[label], lw=2, label=label)
+        ax[5].plot(epochs_token, results[label]["probe_token"], color=colors[label], lw=2, label=label)
     ax[5].set_title("F. Token Probe Accuracy (Train)")
     ax[5].set_xlabel("Epoch"); ax[5].set_ylabel("Accuracy"); ax[5].legend()
 
@@ -620,13 +633,14 @@ if __name__ == "__main__":
     print(f"Training on device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # Parameter grid
-    M_states_list = [4]  # [4, 5, 6]
-    K_symbols_list = [7]
-    L_input_list = [10]  # [7, 11, 15]
+    M_states_list = [3]  # [4, 5, 6]
+    K_symbols_list = [5, 10]
+    L_input_list = [12]  # [7, 11, 15]
     D_delay_list = [40]  # [10, 15, 20]
     s_transitions_list = [2]  # [2, 3]
     s_emissions_list = [3]  # [2, 3]
-    flip_prob_list = [0.05]  # [0.0, 0.05, 0.2]
+    flip_prob_list = [0.0]  # [0.0, 0.05, 0.2]
+    freeze_all_biases_list = [True, False]
 
     # Create all combinations
     param_combinations = list(itertools.product(
@@ -636,11 +650,12 @@ if __name__ == "__main__":
         D_delay_list,
         s_transitions_list,
         s_emissions_list,
-        flip_prob_list
+        flip_prob_list,
+        freeze_all_biases_list
     ))
 
     low_high_combs = [
-        # (0.1, 5.0),
+        (0.1, 5.0),
         (1., 10.)
     ]
 
@@ -648,7 +663,7 @@ if __name__ == "__main__":
     print(f"Running {len(param_combinations) * len(low_high_combs)} parameter combinations...\n")
     # pbar = trange(len(low_high_combs) * len(param_combinations), desc="Total Progress")
     for low_bias, high_bias in low_high_combs:
-        for i, (M, K, L, D, s_t, e_e, flip) in enumerate(param_combinations):
+        for i, (M, K, L, D, s_t, e_e, flip, fr) in enumerate(param_combinations):
             cfg_def = RNNConfig(
                 M_states=M,
                 K_symbols=K,
@@ -659,7 +674,9 @@ if __name__ == "__main__":
                 flip_prob=flip,
                 ood_rewire_frac=1.0,
                 name="default_bias",
-                epochs=75
+                epochs=75,
+                freeze_all_biases=fr
+
             )
             cfg_low = cfg_def.replace(input_gate_bias_std=low_bias, name="low_bias_std")
             cfg_high = cfg_def.replace(input_gate_bias_std=high_bias, name="high_bias_std")
