@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+
 # Define the MLP model
 class MLP(nn.Module):
     """
@@ -49,7 +50,7 @@ class MLP(nn.Module):
             torch.manual_seed(seed)
         for m in self.modules():
             if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight,0, self.w_scale)
+                nn.init.normal_(m.weight, 0, self.w_scale)
                 nn.init.normal_(m.bias, 0, self.b_scale)
 
 
@@ -57,7 +58,6 @@ class MLP(nn.Module):
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 
 import torch
 import torch.nn as nn
@@ -106,11 +106,13 @@ class LSTMWithGateBias(nn.Module):
 
         with torch.no_grad():
             for name, p in self.lstm.named_parameters():
-                if "bias_ih" in name:
+                print(name)
+                print(p.shape)
+                if "bias_ih" in name or 'bias_hh' in name:
                     H = self.hidden_size
                     # LSTM gates: input, forget, cell, output
                     i_gate = slice(0, H)
-                    h_gate = slice(3*H, 4*H)
+                    h_gate = slice(3 * H, 4 * H)
                     p[H:2 * H].fill_(1.0)  # forget gate mean
                     if std and std > 0:
                         p[i_gate].normal_(mean, std)
@@ -132,6 +134,12 @@ class LSTMWithGateBias(nn.Module):
         # Embed the sequence
         emb = self.embedding(x)  # (B, T, emb_dim)
 
+        # add a last dimension of 1 to x
+        # x = x.unsqueeze(-1)
+
+
+        # x_float = x.float()
+
         # Forward through LSTM
         h, _ = self.lstm(emb)
 
@@ -143,6 +151,7 @@ class LSTMWithGateBias(nn.Module):
 
 import torch
 import torch.nn as nn
+
 
 class RNNWithGateBias(nn.Module):
     """
@@ -162,11 +171,11 @@ class RNNWithGateBias(nn.Module):
         self.hidden_size = hidden_size
 
         # Embedding for all tokens (symbols + blank + go)
-        self.embedding = nn.Embedding(input_dim, emb_dim)
+        # self.embedding = nn.Embedding(input_dim, emb_dim)
 
         # Standard RNN
         self.rnn = nn.RNN(
-            input_size=emb_dim,
+            input_size=input_dim,
             hidden_size=hidden_size,
             num_layers=getattr(cfg, "num_layers", 1),
             batch_first=True,
@@ -188,9 +197,9 @@ class RNNWithGateBias(nn.Module):
 
         with torch.no_grad():
             for name, p in self.rnn.named_parameters():
-                if "bias_ih" in name or "bias_hh":
+                if "bias_ih" in name or "bias_hh" in name:
                     if std and std > 0:
-                        p.normal_(mean, std)
+                        nn.init.normal_(p, mean, std)
 
         if freeze:
             for name, p in self.rnn.named_parameters():
@@ -206,11 +215,18 @@ class RNNWithGateBias(nn.Module):
                     K_symbols+1   = go cue
         """
         # Embed the sequence
-        emb = self.embedding(x)  # (B, T, emb_dim)
+        # emb = self.embedding(x)  # (B, T, emb_dim)
+        # 1. One-hot encode the input tensor 'x'
+        # self.input_dim (e.g., K_symbols + 2) is the number of classes
+        x_one_hot = torch.nn.functional.one_hot(x, num_classes=self.cfg.K_symbols+2)
+
+        # 2. Cast the one-hot tensor to float.
+        # 'autocast' will automatically convert this to torch.float16 (Half)
+        x_float = x_one_hot.float()
 
         # Forward through RNN
         # h contains all hidden states for the sequence
-        h, _ = self.rnn(emb)
+        h, _ = self.rnn(x_float)
 
         # Predict output logits
         y = self.readout(h)  # (B, T, K_symbols)

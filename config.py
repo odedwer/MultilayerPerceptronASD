@@ -2,10 +2,12 @@
 from dataclasses import dataclass, asdict, replace
 import torch
 
+from models import LSTMWithGateBias, RNNWithGateBias
+
 
 @dataclass
 class RNNConfig:
-    seed: int = 42
+    seed: int = 97
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     run_id: str = None
 
@@ -24,7 +26,8 @@ class RNNConfig:
 
     # Model
     name: str = "LSTM"
-    emb_dim: int = 16
+    model: [LSTMWithGateBias, RNNWithGateBias] = LSTMWithGateBias
+    emb_dim: int = 4
     use_onehot: bool = False
     hidden_size: int = 128
     num_layers: int = 1

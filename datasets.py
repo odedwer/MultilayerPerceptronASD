@@ -62,14 +62,14 @@ class DelayedCopyHMM(Dataset):
         self.BLANK, self.GO = self.K, self.K + 1
         self.V = self.K + 2
 
-    def __len__(self): return self.n_seq
+    def __len__(self):
+        return self.n_seq
 
     def __getitem__(self, idx):
         L, D, rng = self.cfg.L_input, self.cfg.D_delay, self.rng
 
         # --- Generate input sequence (HMM-driven) ---
         z_inp, x_inp = sample_hmm_sequence(self.T, self.E, L, rng)
-
         # Apply symbol flipping (structured noise)
         if getattr(self.cfg, "flip_prob", 0.0) > 0:
             n_flip = int(len(x_inp) * self.cfg.flip_prob)
@@ -95,7 +95,7 @@ class DelayedCopyHMM(Dataset):
             np.full(L, self.BLANK)  # output phase (model generates)
         ])
 
-        tgt = np.full_like(inp, -100)
+        tgt = np.full_like(inp, self.BLANK)
         tgt[-L:] = x_inp  # only final L positions have target symbols
 
         # --- bookkeeping ---
@@ -107,7 +107,7 @@ class DelayedCopyHMM(Dataset):
 
         # Boolean mask marking delay timesteps
         delay_mask = np.zeros_like(inp, dtype=bool)
-        delay_mask[L+D+1:] = True  # mark delay period only
+        delay_mask[L + D + 1:] = True  # mark delay period only
 
         return (
             torch.tensor(inp, dtype=torch.long),
