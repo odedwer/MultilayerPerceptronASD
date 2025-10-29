@@ -421,16 +421,17 @@ def run_experiment(cfg):
     print(f"[run] Training {cfg.name} (bias_std={cfg.input_gate_bias_std}) on {cfg.device}")
     cfg.bias_means = default_bias_means()
     rng = np.random.RandomState(cfg.seed)
+    rng_test = np.random.RandomState(cfg.seed+7)
 
     # Build data (train, val, test as before)
     T, E = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng)
-    T_test = rewire_transitions(T, cfg.ood_rewire_frac, cfg.s_transitions, rng)
-    plot_hmm_matrices(T, E, T_test, E, cfg, save_path=os.path.join(run_dir, "hmm_matrices.svg"))
+    T_test, E_test = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng_test)
+    plot_hmm_matrices(T, E, T_test, E_test, cfg, save_path=os.path.join(run_dir, "hmm_matrices.svg"))
 
     n_val = max(cfg.n_val, 500)
     train = DelayedCopyHMM(cfg.n_train, T, E, cfg, rng)
     val = DelayedCopyHMM(n_val, T, E, cfg, rng)
-    test = DelayedCopyHMM(cfg.n_test, T_test, E, cfg, rng)
+    test = DelayedCopyHMM(cfg.n_test, T_test, E_test, cfg, rng)
 
     train_loader = torch.utils.data.DataLoader(
         train, batch_size=cfg.batch_size, shuffle=True,
@@ -459,7 +460,7 @@ def run_experiment(cfg):
     #     pass
 
     # Train with per-epoch eval (your existing function that returns dynamics)
-    train_losses, train_metrics = train_model(model, train_loader, val_loader, cfg)
+    train_losses, train_metrics = train_model(model, train_loader, val_loader, test_loader, cfg)
     # Final OOD test metrics
     final_metrics = evaluate(model, test_loader, cfg)
 
@@ -511,7 +512,7 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     T_test, E_test = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions,
                                      np.random.RandomState(cfg_def.seed + 7))
 
-    plot_hmm_matrices(T, E, T_test, E, cfg_def, save_path="hmm_matrices_comparison.svg")
+    plot_hmm_matrices(T, E, T_test, E_test, cfg_def, save_path="hmm_matrices_comparison.svg")
 
     train = DelayedCopyHMM(cfg_def.n_train, T, E, cfg_def, rng)
     val = DelayedCopyHMM(cfg_def.n_val, T, E, cfg_def, rng)
@@ -605,6 +606,7 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
         hist = results[label]
         for (ph, phase), style in PHASE_STYLES.items():
             style.update({"color": colors[label], "lw": 2})
+            print(np.min(hist[f"pcs95_{ph}"]))
             ax[3].plot(epochs_pca, hist[f"pcs95_{ph}"], label=f"{label} {phase.capitalize()}", **style)
 
     ax[3].set_title("D) #PCs for 95% Explained Variance", loc="left", weight="bold")
@@ -614,6 +616,7 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     handles, labels = ax[3].get_legend_handles_labels()
     unique_labels = dict(zip(labels, handles))
     ax[3].legend(unique_labels.values(), unique_labels.keys(), frameon=False, ncol=2)
+
 
     # E. HMM Probe (Avg & Max)
     epochs_hmm = np.arange(len(results[label]["probe_hmm_avg"]))
@@ -627,14 +630,23 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     ax[4].set_ylabel("Accuracy");
     ax[4].legend()
 
-    # F. Token Probe
-    epochs_token = np.arange(len(results[label]["probe_token"]))
+    # === F: PCs for 95% Explained Variance (per phase) ===
+    epochs_pca = np.arange(len(history["pcs80_dl"]))
     for label in results:
-        ax[5].plot(epochs_token, results[label]["probe_token"], color=colors[label], lw=2, label=label)
-    ax[5].set_title("F. Token Probe Accuracy (Train)")
-    ax[5].set_xlabel("Epoch");
-    ax[5].set_ylabel("Accuracy");
-    ax[5].legend()
+        hist = results[label]
+        for (ph, phase), style in PHASE_STYLES.items():
+            print(np.min(hist[f"pcs80_{ph}"]))
+            style.update({"color": colors[label], "lw": 2})
+            ax[5].plot(epochs_pca, hist[f"pcs80_{ph}"], label=f"{label} {phase.capitalize()}", **style)
+
+    ax[5].set_title("D) #PCs for 80% Explained Variance", loc="left", weight="bold")
+    ax[5].set_xlabel("Epoch")
+    ax[5].set_ylabel("# Principal Components")
+    # Tidy up legend
+    handles, labels = ax[5].get_legend_handles_labels()
+    unique_labels = dict(zip(labels, handles))
+    ax[5].legend(unique_labels.values(), unique_labels.keys(), frameon=False, ncol=2)
+
 
     fig.suptitle("Model Comparisons: Low Var (teal) | High Var (red)", fontsize=14, y=1.02)
     plt.tight_layout()
@@ -670,14 +682,15 @@ if __name__ == "__main__":
     print(f"Training on device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # Parameter grid
-    M_states_list = [10]  # [4, 5, 6]
-    K_symbols_list = [20]
-    L_input_list = [90]  # [7, 11, 15]
-    D_delay_list = [140]  # [10, 15, 20]
-    s_transitions_list = [3]  # [2, 3]
-    s_emissions_list = [4]  # [2, 3]
+    M_states_list = [3]  # [4, 5, 6]
+    K_symbols_list = [5]
+    L_input_list = [10]  # [7, 11, 15]
+    D_delay_list = [20]  # [10, 15, 20]
+    s_transitions_list = [2]  # [2, 3]
+    s_emissions_list = [3]  # [2, 3]
     flip_prob_list = [0.0]  # [0.0, 0.05, 0.2]
     freeze_all_biases_list = [False]
+    seeds = [2,16,83,7,99]
 
     # Create all combinations
     param_combinations = list(itertools.product(
@@ -688,11 +701,12 @@ if __name__ == "__main__":
         s_transitions_list,
         s_emissions_list,
         flip_prob_list,
-        freeze_all_biases_list
+        freeze_all_biases_list,
+        seeds
     ))
 
     low_high_combs = [
-        (0.1, 2.0),
+        # (0.1, 2.0),
         (1., 10.)
     ]
 
@@ -700,7 +714,7 @@ if __name__ == "__main__":
     print(f"Running {len(param_combinations) * len(low_high_combs)} parameter combinations...\n")
     # pbar = trange(len(low_high_combs) * len(param_combinations), desc="Total Progress")
     for low_bias, high_bias in low_high_combs:
-        for i, (M, K, L, D, s_t, e_e, flip, fr) in enumerate(param_combinations):
+        for i, (M, K, L, D, s_t, e_e, flip, fr, seed) in enumerate(param_combinations):
             cfg_def = RNNConfig(
                 M_states=M,
                 K_symbols=K,
@@ -711,13 +725,14 @@ if __name__ == "__main__":
                 flip_prob=flip,
                 ood_rewire_frac=1.0,
                 name="default_bias",
-                epochs=40,
+                epochs=150,
                 freeze_all_biases=fr,
                 hidden_size=512,
                 model=LSTMWithGateBias,
-                lr=1e-3
+                lr=1e-3,
+                seed=seed
             )
-            cfg_low = cfg_def.replace(input_gate_bias_std=low_bias, name="low_bias_std")
-            cfg_high = cfg_def.replace(input_gate_bias_std=high_bias, name="high_bias_std")
+            cfg_low = cfg_def.replace(input_gate_bias_std=low_bias, name="low_bias_std1")
+            cfg_high = cfg_def.replace(input_gate_bias_std=high_bias, name="high_bias_std1")
             run_comparison(cfg_def, cfg_low, cfg_high)
             # pbar.update(1)

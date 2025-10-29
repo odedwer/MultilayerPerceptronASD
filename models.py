@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+nn.LSTM
 
 # Define the MLP model
 class MLP(nn.Module):
