@@ -194,7 +194,7 @@ from sklearn.metrics import f1_score
 # ---------- Train ----------
 def train_model(model, train_loader, val_loader, test_loader, cfg):
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
-    criterion = torch.nn.CrossEntropyLoss(reduction='none',ignore_index=cfg.K_symbols)
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=cfg.K_symbols)
     history = {k: [] for k in [
         "train_loss", "val_loss", "test_loss",
         "train_acc", "val_acc", "test_acc",
@@ -221,17 +221,14 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
                 out, H = model(X)
 
                 # Cross-entropy over all timesteps
-                loss_all = criterion(out.transpose(1, 2), Y)
+                loss = criterion(out[delay_mask], Y[delay_mask])
 
                 # Apply mask: only compute over reproduction timesteps
-                masked_loss = loss_all[delay_mask]
-                loss = masked_loss.mean() if masked_loss.numel() > 0 else torch.tensor(0., device=cfg.device)
 
-            if masked_loss.numel() > 0:
-                scaler.scale(loss).backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
-                scaler.step(optimizer)
-                scaler.update()
+            scaler.scale(loss).backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+            scaler.step(optimizer)
+            scaler.update()
 
             # Accuracy computation
             preds = out.argmax(-1)
@@ -375,14 +372,13 @@ def save_epoch_details(H, H_for_pca, H_repro_all, Z, Z_labels_all, cfg, delay_ma
 def evaluate(model, loader, cfg):
     model.eval()
     total_loss, total_correct, total = 0.0, 0, 0
-    criterion = torch.nn.CrossEntropyLoss()
+    criterion = torch.nn.CrossEntropyLoss(ignore_index=cfg.K_symbols)
 
-    for X, Y, delay_mask, _, _ in loader:  # assuming dataset returns (input, target, hidden_labels)
+    for X, Y, _, _, delay_mask in loader:  # assuming dataset returns (input, target, hidden_labels)
         X, Y, delay_mask = X.to(cfg.device), Y.to(cfg.device), delay_mask.to(cfg.device)
         out, _ = model(X)
-        loss = criterion(out.transpose(1, 2), Y)[delay_mask].mean()
+        loss = criterion(out[delay_mask], Y[delay_mask])
         total_loss += loss.item() * X.size(0)
-
         preds = out.argmax(-1)
         total_correct += (preds[delay_mask] == Y[delay_mask]).float().sum().item()
         total += delay_mask.sum().item()
@@ -456,7 +452,7 @@ def run_experiment(cfg):
     )
 
     # Create & (optionally) compile model
-    model = LSTMWithGateBias(cfg.K_symbols+2, cfg.emb_dim, cfg.hidden_size, cfg).to(cfg.device)
+    model = LSTMWithGateBias(cfg.K_symbols + 2, cfg.emb_dim, cfg.hidden_size, cfg).to(cfg.device)
     # try:
     #     model = torch.compile(model, mode="reduce-overhead")
     # except Exception:
@@ -550,7 +546,7 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
 
         # === No cache found: train model ===
 
-        model = cfg.model(cfg.K_symbols+2, cfg.emb_dim, cfg.hidden_size, cfg).to(cfg.device)
+        model = cfg.model(cfg.K_symbols + 2, cfg.emb_dim, cfg.hidden_size, cfg).to(cfg.device)
         # # compile model
         # try:
         #     model = torch.compile(model, mode="reduce-overhead")
@@ -674,12 +670,12 @@ if __name__ == "__main__":
     print(f"Training on device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # Parameter grid
-    M_states_list = [3]  # [4, 5, 6]
-    K_symbols_list = [5]
-    L_input_list = [10]  # [7, 11, 15]
-    D_delay_list = [20]  # [10, 15, 20]
-    s_transitions_list = [2]  # [2, 3]
-    s_emissions_list = [3]  # [2, 3]
+    M_states_list = [10]  # [4, 5, 6]
+    K_symbols_list = [20]
+    L_input_list = [90]  # [7, 11, 15]
+    D_delay_list = [140]  # [10, 15, 20]
+    s_transitions_list = [3]  # [2, 3]
+    s_emissions_list = [4]  # [2, 3]
     flip_prob_list = [0.0]  # [0.0, 0.05, 0.2]
     freeze_all_biases_list = [False]
 
@@ -717,7 +713,7 @@ if __name__ == "__main__":
                 name="default_bias",
                 epochs=40,
                 freeze_all_biases=fr,
-                hidden_size=32,
+                hidden_size=512,
                 model=LSTMWithGateBias,
                 lr=1e-3
             )
