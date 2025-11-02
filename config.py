@@ -3,17 +3,23 @@ from dataclasses import dataclass, asdict, replace
 import torch
 
 from models import LSTMWithGateBias, RNNWithGateBias
+import json
 
 
 @dataclass
 class RNNConfig:
+    cmd: str = ""
+    desc: str = "Default config"
     seed: int = 97
+    data: str = "hmm"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     run_id: str = None
 
     # HMM / Task
     M_states: int = 5
     K_symbols: int = 12
+    word_len: int = 4  # only used if data == "words"
+    symbol_noise_prob: float = 0.0  # only used if data == "words"
     L_input: int = 12
     D_delay: int = 18
     s_transitions: int = 2
@@ -33,6 +39,7 @@ class RNNConfig:
     num_layers: int = 1
     bias_means: dict = None
     input_gate_bias_std: float = None
+    gates_dr: tuple = ("input", "forget", "cell", "output") # apply dynamic range to all gates
     freeze_all_biases: bool = False
     freeze_input_gate_bias_only: bool = False
 
@@ -40,7 +47,7 @@ class RNNConfig:
     lr: float = 1e-3
     batch_size: int = 256
     epochs: int = 20
-    grad_clip: float = 5.0
+    grad_clip: float = 2.0
     test_eval_interval = 10
 
     # Probes
@@ -52,6 +59,13 @@ class RNNConfig:
 
     def replace(self, **kwargs):
         return replace(self, **kwargs)
+
+    def dump(self, path):
+        with open(path, 'w') as f:
+            data = asdict(self)
+            data = {k: (v.__name__ if callable(v) else v) for k, v in data.items()}
+            json.dump(data, f, indent=4)
+
 
 
 def default_bias_means():

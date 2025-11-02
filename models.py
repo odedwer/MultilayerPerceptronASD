@@ -103,6 +103,7 @@ class LSTMWithGateBias(nn.Module):
         std = getattr(self.cfg, "input_gate_bias_std", 0.0)
         mean = getattr(self.cfg, "input_gate_bias_mean", 0.0)
         freeze = getattr(self.cfg, "freeze_all_biases", False)
+        dr_gates = getattr(self.cfg, "gates_dr", ("input", "forget", "cell", "output"))
 
         with torch.no_grad():
             for name, p in self.lstm.named_parameters():
@@ -111,12 +112,26 @@ class LSTMWithGateBias(nn.Module):
                 if "bias_ih" in name or 'bias_hh' in name:
                     H = self.hidden_size
                     # LSTM gates: input, forget, cell, output
-                    i_gate = slice(0, H)
-                    h_gate = slice(3 * H, 4 * H)
+                    dr_slices = []
+                    if "input" in dr_gates:
+                        dr_slices.append(slice(0, H))
+                    if "forget" in dr_gates:
+                        dr_slices.append(slice(H, 2 * H))
+                    if "cell" in dr_gates:
+                        dr_slices.append(slice(2 * H, 3 * H))
+                    if "output" in dr_gates:
+                        dr_slices.append(slice(3 * H, 4 * H))
+                    # i_gate = slice(0, H)
+                    # h_gate = slice(3 * H, 4 * H)
                     p[H:2 * H].fill_(1.0)  # forget gate mean
+                    # Fill the rest with 0 before adding noise
+                    p[:H].fill_(0.0)  # input gate mean
+                    p[2 * H:].fill_(0.0)  # cell and output gate means
+
                     if std and std > 0:
-                        p[i_gate].normal_(mean, std)
-                        p[h_gate].normal_(mean, std)
+                        for s in dr_slices:
+                            p[s].normal_(mean, std)
+                    p[H:2 * H].add_(1.0)  # forget gate mean
 
         if freeze:
             for name, p in self.lstm.named_parameters():

@@ -27,6 +27,43 @@ def make_sparse_hmm(M, K, s_trans, s_emit, rng):
     E = normalize_rows(E)
     return T, E
 
+def make_mc_as_hmm(M, s_trans, rng, lazy_factor=0.5, all_factor=0.05):
+    T = np.zeros((M, M))
+    for i in range(M):
+        succ = rng.choice([j for j in range(M) if j != i], s_trans, replace=False)
+        # w = rng.rand(s_trans)
+        T[i, succ] = (1 - lazy_factor - all_factor) / s_trans
+    T[np.arange(M), np.arange(M)] = lazy_factor
+    T += all_factor / M
+    T = normalize_rows(T)
+    E = np.eye(M)
+    return T, E
+
+def make_mc_words_as_hmm(M, word_len, rng, symbol_noise_prob=0.0):
+    n_words = M // word_len
+    if M % word_len != 0:
+        raise ValueError("M must be divisible by word_len")
+    T = np.zeros((M, M))
+    states = rng.permutation(M)
+    for w in range(n_words):
+        for i in range(word_len):
+            curr_state = states[w * word_len + i]
+            if i == word_len - 1:
+                possible_next = [states[j * word_len] for j in range(n_words)]
+                for next_state in possible_next:
+                    T[curr_state, next_state] = 1.0 / n_words
+            else:
+                next_state = states[w * word_len + i + 1]
+                T[curr_state, next_state] = 1.0
+    E = np.eye(M)
+    if symbol_noise_prob > 0.0:
+        E *= (1 - symbol_noise_prob)
+        noise = np.ones((M, M)) * (symbol_noise_prob / (M - 1))
+        noise[np.arange(M), np.arange(M)] = 0.0
+        E += noise
+        E = normalize_rows(E)
+    return T, E
+
 
 def rewire_transitions(T, frac_rows, s_trans, rng):
     T2 = T.copy()
@@ -38,6 +75,14 @@ def rewire_transitions(T, frac_rows, s_trans, rng):
         T2[i, :] = 0.0
         T2[i, succ] = w
     return normalize_rows(T2)
+
+
+def shuffle_transitions(T, rng):
+    T2 = T.copy()
+    M = T.shape[0]
+    perm = rng.permutation(M)
+    T2 = T2[perm][:, perm]
+    return T2
 
 
 def sample_hmm_sequence(T, E, L, rng):

@@ -12,13 +12,15 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 from config import RNNConfig, default_bias_means
-from datasets import make_sparse_hmm, rewire_transitions, DelayedCopyHMM
+from datasets import make_sparse_hmm, rewire_transitions, DelayedCopyHMM, make_mc_words_as_hmm
 from models import LSTMWithGateBias, RNNWithGateBias
 import utils
 import seaborn as sns
 import os, json, hashlib, time
 from dataclasses import asdict
 import itertools
+import argparse
+import sys
 
 scaler = GradScaler()
 
@@ -226,7 +228,7 @@ def train_model(model, train_loader, val_loader, test_loader, cfg):
                 # Apply mask: only compute over reproduction timesteps
 
             scaler.scale(loss).backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=2.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cfg.grad_clip)
             scaler.step(optimizer)
             scaler.update()
 
@@ -423,9 +425,18 @@ def run_experiment(cfg):
     rng = np.random.RandomState(cfg.seed)
     rng_test = np.random.RandomState(cfg.seed+7)
 
-    # Build data (train, val, test as before)
-    T, E = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng)
-    T_test, E_test = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng_test)
+    if cfg.data.lower() == "hmm":
+        print(f"[data] Generating HMM data (M={cfg.M_states}, K={cfg.K_symbols}")
+        # Build data (train, val, test as before)
+        T, E = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng)
+        T_test, E_test = make_sparse_hmm(cfg.M_states, cfg.K_symbols, cfg.s_transitions, cfg.s_emissions, rng_test)
+    elif cfg.data == "words":
+        print(f"[data] Generating MC words data (M={cfg.M_states}, word_len={cfg.word_len})")
+        T, E = make_mc_words_as_hmm(cfg.M_states, cfg.word_len, rng)
+        T_test, E_test = make_mc_words_as_hmm(cfg.M_states, cfg.word_len, rng_test)
+    else:
+        raise ValueError(f"Unknown data type: {cfg.data}")
+
     plot_hmm_matrices(T, E, T_test, E_test, cfg, save_path=os.path.join(run_dir, "hmm_matrices.svg"))
 
     n_val = max(cfg.n_val, 500)
@@ -508,11 +519,22 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     # names = {"Default": cfg_def, "Low": cfg_low, "High": cfg_high}
     names = {"Low": cfg_low, "High": cfg_high}
     rng = np.random.RandomState(cfg_def.seed)
-    T, E = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions, rng)
-    T_test, E_test = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions,
-                                     np.random.RandomState(cfg_def.seed + 7))
+    rng_test = np.random.RandomState(cfg_def.seed + 7)
+    if cfg_def.data.lower() == "hmm":
+        print(f"[data] Generating HMM data (M={cfg_def.M_states}, K={cfg_def.K_symbols}")
+        # Build data (train, val, test as before)
+        T, E = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions, rng)
+        T_test, E_test = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions, rng_test)
+    elif cfg_def.data == "words":
+        print(f"[data] Generating MC words data (M={cfg_def.M_states}, word_len={cfg_def.word_len})")
+        T, E = make_mc_words_as_hmm(cfg_def.M_states, cfg_def.word_len, rng, symbol_noise_prob=cfg_def.symbol_noise_prob)
+        T_test, E_test = make_mc_words_as_hmm(cfg_def.M_states, cfg_def.word_len, rng_test, symbol_noise_prob=cfg_def.symbol_noise_prob)
+    else:
+        raise ValueError(f"Unknown data type: {cfg_def.data}")
+    # T, E = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions, rng)
+    # T_test, E_test = make_sparse_hmm(cfg_def.M_states, cfg_def.K_symbols, cfg_def.s_transitions, cfg_def.s_emissions,
+    #                                  np.random.RandomState(cfg_def.seed + 7))
 
-    plot_hmm_matrices(T, E, T_test, E_test, cfg_def, save_path="hmm_matrices_comparison.svg")
 
     train = DelayedCopyHMM(cfg_def.n_train, T, E, cfg_def, rng)
     val = DelayedCopyHMM(cfg_def.n_val, T, E, cfg_def, rng)
@@ -654,10 +676,16 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
     # --- Save figure and index ---
     timestamp = int(time.time())
     summary_path = f"summary_grid_{timestamp}.svg"
+    cfg_high_path = f"cfg_high_{timestamp}.json"
+    cfg_low_path = f"cfg_low_{timestamp}.json"
     results_dir = "results"
     os.makedirs(results_dir, exist_ok=True)
     plt.savefig(os.path.join(results_dir, summary_path), dpi=300, bbox_inches="tight")
     plt.show()
+    plot_hmm_matrices(T, E, T_test, E_test, cfg_def, save_path=os.path.join(results_dir,f"hmm_matrices_comparison_{timestamp}.svg"))
+
+    cfg_low.dump(os.path.join(results_dir, cfg_low_path))
+    cfg_high.dump(os.path.join(results_dir, cfg_high_path))
 
     summary_index = {
         "summary_file": summary_path,
@@ -678,19 +706,55 @@ def run_comparison(cfg_def, cfg_low, cfg_high):
 
 
 if __name__ == "__main__":
+    # default hidden_dim = 512
+    default_hidden_dim = 128
+    parser = argparse.ArgumentParser(description="RNN HMM Delayed Copy Experiment Runner")
+    parser.add_argument("--data", type=str, default="hmm", help="Type of data to use: 'hmm' or 'words'")
+    parser.add_argument("--M_states", type=int, default=3, help="Number of HMM hidden states")
+    parser.add_argument("--K_symbols", type=int, default=9, help="Number of HMM observation symbols")
+    parser.add_argument("--word_len", type=int, default=3, help="Length of words (if using 'words' data)")
+    parser.add_argument("--symbol_noise_prob", type=float, default=0.0, help="Probability of symbol noise in 'words' data")
+    parser.add_argument("--L_input", type=int, default=10, help="Length of input sequence")
+    parser.add_argument("--D_delay", type=int, default=10, help="Length of delay period")
+    parser.add_argument("--s_transitions", type=int, default=2, help="Sparsity of HMM transition matrix")
+    parser.add_argument("--s_emissions", type=int, default=3, help="Sparsity of HMM emission matrix")
+    parser.add_argument("--model_type", type=str, default="LSTM", help="Type of RNN model to use")
+    parser.add_argument("--dr_gates", type=str, default="input,forget,cell,output", help="Gates to apply bias variability manipulation to")
+    parser.add_argument("--low_dr_std", type=float, default=1.0, help="Standard deviation for low bias variability")
+    parser.add_argument("--high_dr_std", type=float, default=10.0, help="Standard deviation for high bias variability")
+    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--hidden_size", type=int, default=default_hidden_dim, help="Hidden size of the RNN")
+    parser.add_argument("--n_train", type=int, default=15000, help="Number of training samples")
+    parser.add_argument("--desc",type=str, default="", help="Description for the experiment")
+    parser.add_argument("--n_seeds", type=int, default=5, help="Number of random seeds to run")
+    parser.add_argument("--epochs", type=int, default=150, help="Number of training epochs")
+    parser.add_argument("--force_seed", type=int, default=-1, help="If >=0, forces all runs to use this seed")
+    args = parser.parse_args()
+    print(args)
     torch.set_float32_matmul_precision('medium')
     print(f"Training on device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
     # Parameter grid
-    M_states_list = [3]  # [4, 5, 6]
-    K_symbols_list = [5]
-    L_input_list = [10]  # [7, 11, 15]
-    D_delay_list = [20]  # [10, 15, 20]
+    # M_states_list = [3]  # [4, 5, 6]
+    # K_symbols_list = [5]
+    # L_input_list = [10]  # [7, 11, 15]
+    # D_delay_list = [20]  # [10, 15, 20]
+    # M_states_list = [3]  # [4, 5, 6]
+    # K_symbols_list = [9]
+    # L_input_list = [15]  # [7, 11, 15]
+    # D_delay_list = [20]  # [10, 15, 20]
+    M_states_list = [args.M_states]
+    K_symbols_list = [args.K_symbols]
+    L_input_list = [args.L_input]
+    D_delay_list = [args.D_delay]
     s_transitions_list = [2]  # [2, 3]
     s_emissions_list = [3]  # [2, 3]
     flip_prob_list = [0.0]  # [0.0, 0.05, 0.2]
     freeze_all_biases_list = [False]
-    seeds = [2,16,83,7,99]
+    seeds = [2,16,83,7,99, 42]
+    seeds = seeds[:args.n_seeds]
+    if args.force_seed >= 0:
+        seeds = [args.force_seed] * args.n_seeds
 
     # Create all combinations
     param_combinations = list(itertools.product(
@@ -707,15 +771,20 @@ if __name__ == "__main__":
 
     low_high_combs = [
         # (0.1, 2.0),
-        (1., 10.)
+        (args.low_dr_std, args.high_dr_std)
     ]
 
     # Run experiments for each combination
     print(f"Running {len(param_combinations) * len(low_high_combs)} parameter combinations...\n")
     # pbar = trange(len(low_high_combs) * len(param_combinations), desc="Total Progress")
+    model_cls = LSTMWithGateBias if args.model_type.lower() == "lstm" else RNNWithGateBias
+    print(f"Using model class: {model_cls.__name__}")
     for low_bias, high_bias in low_high_combs:
         for i, (M, K, L, D, s_t, e_e, flip, fr, seed) in enumerate(param_combinations):
             cfg_def = RNNConfig(
+                data=args.data,
+                word_len=args.word_len,
+                symbol_noise_prob=args.symbol_noise_prob,
                 M_states=M,
                 K_symbols=K,
                 L_input=L,
@@ -725,12 +794,16 @@ if __name__ == "__main__":
                 flip_prob=flip,
                 ood_rewire_frac=1.0,
                 name="default_bias",
-                epochs=150,
+                epochs=args.epochs,
                 freeze_all_biases=fr,
-                hidden_size=512,
-                model=LSTMWithGateBias,
-                lr=1e-3,
-                seed=seed
+                hidden_size=args.hidden_size,
+                model=model_cls,
+                lr=args.lr,
+                seed=seed,
+                gates_dr=tuple(args.dr_gates.split(",")),
+                n_train=args.n_train,
+                desc=args.desc,
+                cmd=" ".join(sys.argv)
             )
             cfg_low = cfg_def.replace(input_gate_bias_std=low_bias, name="low_bias_std1")
             cfg_high = cfg_def.replace(input_gate_bias_std=high_bias, name="high_bias_std1")
