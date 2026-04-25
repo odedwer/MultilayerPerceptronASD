@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-nn.LSTM
+import torch.nn.functional as F
 
 # Define the MLP model
 class MLP(nn.Module):
@@ -55,13 +55,11 @@ class MLP(nn.Module):
 
 
 # model.py
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+# import torch
+# import torch.nn as nn
+# import torch.nn.functional as F
 
-import torch
-import torch.nn as nn
-
+# (Redundant imports removed for brevity)
 
 class LSTMWithGateBias(nn.Module):
     """
@@ -94,44 +92,54 @@ class LSTMWithGateBias(nn.Module):
         # Output layer (predict over K_symbols, not including blank/go)
         self.readout = nn.Linear(hidden_size, cfg.K_symbols)
 
-        # Custom initialization for input gate bias only
-        self._init_input_gate_bias()
+        # Custom initialization for all gates
+        self._init_biases()
 
     # ----------------------------------------------------------------------
-    def _init_input_gate_bias(self):
-        """Modify only the input gate bias (first quarter of bias_ih)."""
-        std = getattr(self.cfg, "input_gate_bias_std", 0.0)
-        mean = getattr(self.cfg, "input_gate_bias_mean", 0.0)
+    def _init_biases(self):
+        """Modify all gates based on cfg."""
         freeze = getattr(self.cfg, "freeze_all_biases", False)
         dr_gates = getattr(self.cfg, "gates_dr", ("input", "forget", "cell", "output"))
 
+        # Get global defaults
+        g_mean = getattr(self.cfg, "global_bias_mean", 0.0)
+        g_std = getattr(self.cfg, "global_bias_std", 0.0)
+
+        # Get gate-specific defaults (default to empty dict if None or missing)
+        g_means = getattr(self.cfg, "bias_means", None) or {}
+        g_stds = getattr(self.cfg, "bias_std", None) or {}
+
         with torch.no_grad():
             for name, p in self.lstm.named_parameters():
-                print(name)
-                print(p.shape)
                 if "bias_ih" in name or 'bias_hh' in name:
                     H = self.hidden_size
-                    # LSTM gates: input, forget, cell, output
-                    dr_slices = []
-                    if "input" in dr_gates:
-                        dr_slices.append(slice(0, H))
-                    if "forget" in dr_gates:
-                        dr_slices.append(slice(H, 2 * H))
-                    if "cell" in dr_gates:
-                        dr_slices.append(slice(2 * H, 3 * H))
-                    if "output" in dr_gates:
-                        dr_slices.append(slice(3 * H, 4 * H))
-                    # i_gate = slice(0, H)
-                    # h_gate = slice(3 * H, 4 * H)
-                    p[H:2 * H].fill_(1.0)  # forget gate mean
-                    # Fill the rest with 0 before adding noise
-                    p[:H].fill_(0.0)  # input gate mean
-                    p[2 * H:].fill_(0.0)  # cell and output gate means
 
-                    if std and std > 0:
-                        for s in dr_slices:
-                            p[s].normal_(mean, std)
-                    p[H:2 * H].add_(1.0)  # forget gate mean
+                    # 1. Start with global mean/std
+                    p.fill_(g_mean)
+                    if g_std > 0:
+                        p.normal_(g_mean, g_std)
+
+                    # 2. Apply gate-specific overrides if provided in dr_gates
+                    # LSTM gates in bias_ih: [i, f, g, o]
+                    if dr_gates:
+                        # Mapping gate names to slices
+                        gate_map = {
+                            "input": slice(0, H),
+                            "forget": slice(H, 2 * H),
+                            "cell": slice(2 * H, 3 * H),
+                            "output": slice(3 * H, 4 * H)
+                        }
+
+                        for gate_name in dr_gates:
+                            if gate_name in gate_map:
+                                s = gate_map[gate_name]
+                                # Use gate-specific mean/std if available, else global
+                                m = g_means.get(gate_name, g_mean)
+                                std = g_stds.get(gate_name, g_std)
+
+                                p[s].fill_(m)
+                                if std > 0:
+                                    p[s].normal_(m, std)
 
         if freeze:
             for name, p in self.lstm.named_parameters():
@@ -139,33 +147,30 @@ class LSTMWithGateBias(nn.Module):
                     p.requires_grad_(False)
 
     # ----------------------------------------------------------------------
+    def step(self, x_t, h_t, c_t):
+        """
+        Single step of the LSTM.
+        :param x_t: Input indices (B, 1)
+        :param h_t: Hidden state (B, H)
+        :param c_t: Cell state (B, H)
+        :return: h_next (B, H), (h_next (B, H), c_next (B, H))
+        """
+        if x_t.dim() == 1:
+            x_t = x_t.unsqueeze(1)
+        emb = self.embedding(x_t)  # (B, 1, emb_dim)
+        if h_t.dim() == 2:
+            h_t = h_t.unsqueeze(0)
+            c_t = c_t.unsqueeze(0)
+        out, (h_next, c_next) = self.lstm(emb, (h_t, c_t))
+        h_next = h_next.squeeze(0)
+        c_next = c_next.squeeze(0)
+        return h_next, (h_next, c_next)
+
     def forward(self, x):
-        """
-        x: LongTensor of shape (batch, seq_len)
-           Tokens: 0..K_symbols-1 = real symbols
-                    K_symbols     = blank token
-                    K_symbols+1   = go cue
-        """
-        # Embed the sequence
-        emb = self.embedding(x)  # (B, T, emb_dim)
-
-        # add a last dimension of 1 to x
-        # x = x.unsqueeze(-1)
-
-
-        # x_float = x.float()
-
-        # Forward through LSTM
-        h, _ = self.lstm(emb)
-
-        # Predict output logits
-        y = self.readout(h)  # (B, T, K_symbols)
-
-        return y, h
-
-
-import torch
-import torch.nn as nn
+        emb = self.embedding(x)              # (B, T, emb_dim)
+        H, (h_n, c_n) = self.lstm(emb)      # H: (B, T, hidden_size)
+        logits = self.readout(H)             # (B, T, K_symbols)
+        return logits, H
 
 
 class RNNWithGateBias(nn.Module):
@@ -174,8 +179,7 @@ class RNNWithGateBias(nn.Module):
 
     - Input tokens are integer indices: 0..K_symbols-1 (symbols), K_symbols (blank), K_symbols+1 (go)
     - Uses nn.Embedding instead of one-hot encodings.
-    - Only the input-to-hidden bias (bias_ih) is initialized differently (mean/std from cfg).
-    - All other weights and biases remain at PyTorch defaults.
+    - All biases are initialized according to cfg.
     """
 
     def __init__(self, input_dim, emb_dim, hidden_size, cfg):
@@ -185,36 +189,47 @@ class RNNWithGateBias(nn.Module):
         self.emb_dim = emb_dim
         self.hidden_size = hidden_size
 
-        # Embedding for all tokens (symbols + blank + go)
-        # self.embedding = nn.Embedding(input_dim, emb_dim)
-
         # Standard RNN
         self.rnn = nn.RNN(
             input_size=input_dim,
             hidden_size=hidden_size,
             num_layers=getattr(cfg, "num_layers", 1),
             batch_first=True,
-            # nonlinearity='tanh' is the default
         )
 
         # Output layer (predict over K_symbols, not including blank/go)
         self.readout = nn.Linear(hidden_size, cfg.K_symbols)
 
-        # Custom initialization for input-to-hidden bias
-        self._init_bias()
+        # Custom initialization for biases
+        self._init_biases()
 
     # ----------------------------------------------------------------------
-    def _init_bias(self):
-        """Modify only the input-to-hidden bias (bias_ih)."""
-        std = getattr(self.cfg, "input_gate_bias_std", 0.0)
-        mean = getattr(self.cfg, "input_gate_bias_mean", 0.0)
+    def _init_biases(self):
+        """Modify biases based on cfg."""
         freeze = getattr(self.cfg, "freeze_all_biases", False)
+
+        # Get global defaults
+        g_mean = getattr(self.cfg, "global_bias_mean", 0.0)
+        g_std = getattr(self.cfg, "global_bias_std", 0.0)
+
+        # Get gate-specific defaults (default to empty dict if None or missing)
+        g_means = getattr(self.cfg, "bias_means", None) or {}
+        g_stds = getattr(self.cfg, "bias_std", None) or {}
 
         with torch.no_grad():
             for name, p in self.rnn.named_parameters():
                 if "bias_ih" in name or "bias_hh" in name:
-                    if std and std > 0:
-                        nn.init.normal_(p, mean, std)
+                    # Start with global
+                    p.fill_(g_mean)
+                    if g_std > 0:
+                        p.normal_(g_mean, g_std)
+
+                    # If specific biases are provided for the RNN (as a single set)
+                    if g_means:
+                        # We'll just use the first one or assume it' Denotes all
+                        p.normal_(next(iter(g_means.values())), next(iter(g_stds.values()), g_std))
+                    elif g_stds:
+                         p.normal_(g_mean, next(iter(g_stds.values())))
 
         if freeze:
             for name, p in self.rnn.named_parameters():
@@ -222,28 +237,24 @@ class RNNWithGateBias(nn.Module):
                     p.requires_grad_(False)
 
     # ----------------------------------------------------------------------
+    def step(self, x_t, h_t):
+        """
+        Single step of the RNN.
+        :param x_t: Input indices (B, 1)
+        :param h_t: Hidden state (B, H)
+        :return: h_next (B, H), h_next (B, H)
+        """
+        if x_t.dim() == 1:
+            x_t = x_t.unsqueeze(1)
+        x_one_hot = F.one_hot(x_t, num_classes=self.cfg.K_symbols + 2).float()  # (B, 1, K+2)
+        if h_t.dim() == 2:
+            h_t = h_t.unsqueeze(0)
+        out, h_next = self.rnn(x_one_hot, h_t)
+        h_next = h_next.squeeze(0)
+        return h_next, h_next
+
     def forward(self, x):
-        """
-        x: LongTensor of shape (batch, seq_len)
-           Tokens: 0..K_symbols-1 = real symbols
-                    K_symbols     = blank token
-                    K_symbols+1   = go cue
-        """
-        # Embed the sequence
-        # emb = self.embedding(x)  # (B, T, emb_dim)
-        # 1. One-hot encode the input tensor 'x'
-        # self.input_dim (e.g., K_symbols + 2) is the number of classes
-        x_one_hot = torch.nn.functional.one_hot(x, num_classes=self.cfg.K_symbols+2)
-
-        # 2. Cast the one-hot tensor to float.
-        # 'autocast' will automatically convert this to torch.float16 (Half)
-        x_float = x_one_hot.float()
-
-        # Forward through RNN
-        # h contains all hidden states for the sequence
-        h, _ = self.rnn(x_float)
-
-        # Predict output logits
-        y = self.readout(h)  # (B, T, K_symbols)
-
-        return y, h
+        x_one_hot = F.one_hot(x, num_classes=self.cfg.K_symbols + 2).float()  # (B, T, K+2)
+        H, h_n = self.rnn(x_one_hot)         # H: (B, T, hidden_size)
+        logits = self.readout(H)             # (B, T, K_symbols)
+        return logits, H

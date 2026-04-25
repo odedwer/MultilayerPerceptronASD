@@ -37,8 +37,15 @@ class RNNConfig:
     use_onehot: bool = False
     hidden_size: int = 128
     num_layers: int = 1
-    bias_means: dict = None
+
+    # Bias Initialization
+    bias_means: dict = None # dict of gate names to means
+    bias_std: dict = None # dict of gate names to stds
+    global_bias_mean: float = 0.0
+    global_bias_std: float = 0.0
+
     input_gate_bias_std: float = None
+    input_gate_bias_mean: float = 0.0
     gates_dr: tuple = ("input", "forget", "cell", "output") # apply dynamic range to all gates
     freeze_all_biases: bool = False
     freeze_input_gate_bias_only: bool = False
@@ -67,6 +74,5 @@ class RNNConfig:
             json.dump(data, f, indent=4)
 
 
-
 def default_bias_means():
-    return {"i": 0.0, "f": 1.0, "g": 0.0, "o": 0.0}
+    return {"input": 0.0, "forget": 1.0, "cell": 0.0, "output": 0.0}

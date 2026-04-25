@@ -17,6 +17,7 @@ from sklearn.metrics.pairwise import pairwise_distances
 from matplotlib.gridspec import GridSpec
 from datasets import GaussianTask
 from models import MLP
+import seaborn as sns
 ASD_COLOR = "#FF0000"
 NT_COLOR = "#00A08A"
 
@@ -48,6 +49,7 @@ def train_mlp_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_s
     :param grid: The grid for the centers on which the sigmoid will be fitted
     :param optimizer_type: The optimizer type
     :param num_epochs: The number of epochs for training
+    :param device: The device to use
     :return: The trained model, the responses, the fitted parameters, and the covariance matrices of the parameters
     """
     if device is None:
@@ -97,7 +99,6 @@ def train_mlp_model(input_size, hidden_size, n_hidden, output_size, w_scale, b_s
             resp = model(grid_tensor).cpu().detach().numpy()
             resps.append(resp)
             # fit the sigmoid function to the resp
-
             try:
                 params, pcov = curve_fit(sigmoid, np.squeeze(x), np.squeeze(resp))
                 fit_pcov.append(pcov)
@@ -167,6 +168,7 @@ def create_gaussian_dataset(input_size, num_samples, loc, scale, n_gaussians=2, 
     :param scale: The scale of the Gaussians
     :param n_gaussians: The number of Gaussians
     :param seed: The seed for the random number generator
+    :param device: The device to use
     :return: X_train, X_test, y_train, y_test, The DataGenerator object, grid, training data DataLoader
     """
     if device is None:
@@ -250,7 +252,7 @@ def plot_change_in_slope(params_low_bias, params_high_bias, pcov_low_bias, pcov_
     return fig
 
 
-def plot_km(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs, ax=None):
+def km(params_low_bias, params_high_bias, pcov_low_bias, pcov_high_bias, num_epochs, ax=None):
     """
     Plot the x value for which the sigmoid crosses 0.5
     :param params_low_bias: The fitted parameters of the Low variance model sigmoid
@@ -304,14 +306,6 @@ def plot_learning_speed(params_low_bias, params_high_bias, num_epochs, ax_slope=
                   markersize=1)
     ax_slope.set_ylabel(r"$\Delta$Slope")
     ax_slope.legend()
-
-    # ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_low_bias[num_epochs // 50:, 0]),
-    #               label="Low variance",
-    #               color=NT_COLOR, markersize=1)
-    # ax_epoch.plot(range(num_epochs // 50, num_epochs - 1), np.diff(params_high_bias[num_epochs // 50:, 0]),
-    #               label="High variance", color=ASD_COLOR, markersize=1)
-    # ax_epoch.set_title("Threshold change speed")
-    # ax_epoch.legend()
     return fig
 
 
@@ -337,6 +331,7 @@ def plot_variance_sliding_window(params_low_bias, params_high_bias, ax=None):
     ax.set_xlabel(f"Window, #epochs per window={window_size}")
     ax.set_ylabel("Variance")
     ax.legend()
+    return fig
 
 
 def plot_decision_boundary(X_train, y_train, model, ax, title=None):
@@ -346,6 +341,7 @@ def plot_decision_boundary(X_train, y_train, model, ax, title=None):
     :param y_train: The training labels
     :param model: The model
     :param ax: The axis
+    :param title: The title
     """
     train_x_c0 = X_train[y_train.flatten() == 0, :]
     train_x_c1 = X_train[y_train.flatten() == 1, :]
@@ -362,7 +358,7 @@ def plot_decision_boundary(X_train, y_train, model, ax, title=None):
     c = ax.pcolormesh(linspace, linspace, classifications, vmin=0, vmax=1, alpha=0.5, cmap='coolwarm')
     ax.scatter(*train_x_c1.T)
     ax.scatter(*train_x_c0.T)
-    # plot the countour of the decision boundary by coloring the sep_grid points according to the model response
+    # plot the contour of the decision boundary by coloring the sep_grid points according to the model response
     if title:
         ax.set_title(title)
     return c
@@ -413,5 +409,106 @@ def estimate_empirical_transitions(train_dataset, M):
     row_sums[row_sums == 0] = 1
     return counts / row_sums
 
+
 import seaborn as sns
 
+# --- New Research Metrics ---
+
+def memory_decay(hidden_states, max_tau):
+    """
+    Computes the auto-correlation of the hidden state vector over time.
+    :param hidden_states: (batch, seq_len, hidden_dim)
+    :param max_tau: Maximum lag to consider
+    :return: Array of correlations for each lag in [1, max_tau]
+    """
+    batch, seq_len, hidden_dim = hidden_states.shape
+    flat_states = hidden_states.reshape(-1, seq_len)
+
+    correlations = []
+    for tau in range(1, max_tau + 1):
+        if tau >= seq_len:
+            correlations.append(np.nan)
+            continue
+        x = flat_states[:, :-tau]
+        y = flat_states[:, tau:]
+        x_mean = x.mean(axis=1, keepdims=True)
+        y_mean = y.mean(axis=1, keepdims=True)
+        x_centered = x - x_mean
+        y_centered = y - y_mean
+        cov = (x_centered * y_centered).mean(axis=1)
+        std_x = x_centered.std(axis=1)
+        std_y = y_centered.std(axis=1)
+        corr = cov / (std_x * std_y + 1e-12)
+        correlations.append(np.nanmean(corr))
+    return np.array(correlations)
+
+def jacobian_spectral_radius(model, input_seq, device='cpu', iterations=20):
+    """
+    Estimates the spectral radius of the Jacobian J = dh_{t+1}/dh_t using power iteration.
+    Uses VJPs (vector-Jacobian products via autograd) to compute J^T v at each step.
+    The power iteration on J^T converges to the dominant left singular vector; the
+    corresponding singular value equals the spectral radius for normal matrices and
+    provides a good proxy for RNN stability analysis.
+
+    :param model: The recurrent model with a `step` method.
+    :param input_seq: (1, seq_len) tensor of integer token indices; at least length 2.
+    :param device: Device string.
+    :param iterations: Number of power iterations.
+    :return: Estimated spectral radius (float), or np.nan if unsupported.
+    """
+    # Keep in train mode so cuDNN RNN supports gradient computation.
+    # We disable dropout-style stochasticity by being explicit about no_grad where needed.
+    was_training = model.training
+    model.train()
+    model = model.to(device)
+
+    x = input_seq[0:1].to(device)
+    x_1 = x[:, 0:1]
+    x_2 = x[:, 1:2]
+
+    is_lstm = hasattr(model, 'lstm')
+
+    # Get hidden state after first token
+    with torch.no_grad():
+        if is_lstm:
+            emb_1 = model.embedding(x_1)
+            out, (h_n, c_n) = model.lstm(emb_1)
+            h_t = out[:, -1, :]        # (1, H)
+            c_t = c_n.squeeze(0)       # (1, H)
+        elif hasattr(model, 'rnn'):
+            x_one_hot = torch.nn.functional.one_hot(x_1, num_classes=model.cfg.K_symbols + 2).float()
+            out, h_n = model.rnn(x_one_hot)
+            h_t = out[:, -1, :]        # (1, H)
+        else:
+            return np.nan
+
+    h_dim = h_t.shape[1]
+    v = torch.randn(1, h_dim, device=device)
+    v = v / torch.norm(v)
+    sigma = torch.tensor(1.0, device=device)
+
+    for _ in range(iterations):
+        h_leaf = h_t.detach().clone().requires_grad_(True)
+
+        if is_lstm:
+            h_next, _ = model.step(x_2, h_leaf, c_t.detach())
+        else:
+            h_next, _ = model.step(x_2, h_leaf)
+
+        # w = J^T v  (VJP via autograd)
+        w = torch.autograd.grad(h_next, h_leaf, grad_outputs=v, retain_graph=False)[0]
+        sigma = torch.norm(w)
+        if sigma.item() == 0:
+            return 0.0
+        v = w / sigma
+
+    model.train(was_training)
+    return sigma.item()
+
+def effective_dimensionality_extended(activations):
+    """
+    Refined dimensionality measure using the participation ratio of the singular values.
+    """
+    X = activations.reshape(-1, activations.shape[-1])
+    _, S, _ = np.linalg.svd(X, full_matrices=False)
+    return participation_ratio(S)
